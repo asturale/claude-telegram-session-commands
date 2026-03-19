@@ -27,10 +27,7 @@ These are Claude Code commands — run `claude` to start a session first.
 Install the plugin:
 ```
 /plugin install telegram@claude-plugins-official
-/reload-plugins
 ```
-
-Check that `/telegram:configure` tab-completes. If not, restart your session.
 
 **3. Give the server the token.**
 
@@ -38,7 +35,7 @@ Check that `/telegram:configure` tab-completes. If not, restart your session.
 /telegram:configure 123456789:AAHfiqksKZ8...
 ```
 
-Writes `TELEGRAM_BOT_TOKEN=...` to `~/.claude/channels/telegram/.env`. You can also write that file by hand, or set the variable in your shell environment — shell takes precedence.
+Writes `TELEGRAM_BOT_TOKEN=...` to `.claude/channels/telegram/.env` in your project. You can also write that file by hand, or set the variable in your shell environment — shell takes precedence.
 
 **4. Relaunch with the channel flag.**
 
@@ -50,7 +47,7 @@ claude --channels plugin:telegram@claude-plugins-official
 
 **5. Pair.**
 
-DM your bot on Telegram — it replies with a 6-character pairing code. In your assistant session:
+With Claude Code running from the previous step, DM your bot on Telegram — it replies with a 6-character pairing code. If the bot doesn't respond, make sure your session is running with `--channels`. In your Claude Code session:
 
 ```
 /telegram:access pair <code>
