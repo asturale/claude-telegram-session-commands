@@ -1,51 +1,95 @@
-# Claude Code Plugins Directory
+# Telegram
 
-A curated directory of high-quality plugins for Claude Code.
+Connect a Telegram bot to your Claude Code with an MCP server.
 
-> **⚠️ Important:** Make sure you trust a plugin before installing, updating, or using it. Anthropic does not control what MCP servers, files, or other software are included in plugins and cannot verify that they will work as intended or that they won't change. See each plugin's homepage for more information.
+The MCP server logs into Telegram as a bot and provides tools to Claude to reply, react, or edit messages. When you message the bot, the server forwards the message to your Claude Code session.
 
-## Structure
+## Quick Setup
+> Default pairing flow for a single-user DM bot. See [ACCESS.md](./ACCESS.md) for groups and multi-user setups.
 
-- **`/plugins`** - Internal plugins developed and maintained by Anthropic
-- **`/external_plugins`** - Third-party plugins from partners and the community
+**1. Create a bot with BotFather.**
 
-## Installation
+Open a chat with [@BotFather](https://t.me/BotFather) on Telegram and send `/newbot`. BotFather asks for two things:
 
-Plugins can be installed directly from this marketplace via Claude Code's plugin system.
+- **Name** — the display name shown in chat headers (anything, can contain spaces)
+- **Username** — a unique handle ending in `bot` (e.g. `my_assistant_bot`). This becomes your bot's link: `t.me/my_assistant_bot`.
 
-To install, run `/plugin install {plugin-name}@claude-plugins-official`
+BotFather replies with a token that looks like `123456789:AAHfiqksKZ8...` — that's the whole token, copy it including the leading number and colon.
 
-or browse for the plugin in `/plugin > Discover`
+**2. Install the plugin.**
 
-## Contributing
+These are Claude Code commands — run `claude` to start a session first.
 
-### Internal Plugins
-
-Internal plugins are developed by Anthropic team members. See `/plugins/example-plugin` for a reference implementation.
-
-### External Plugins
-
-Third-party partners can submit plugins for inclusion in the marketplace. External plugins must meet quality and security standards for approval. To submit a new plugin, use the [plugin directory submission form](https://clau.de/plugin-directory-submission).
-
-## Plugin Structure
-
-Each plugin follows a standard structure:
-
+Install the plugin:
 ```
-plugin-name/
-├── .claude-plugin/
-│   └── plugin.json      # Plugin metadata (required)
-├── .mcp.json            # MCP server configuration (optional)
-├── commands/            # Slash commands (optional)
-├── agents/              # Agent definitions (optional)
-├── skills/              # Skill definitions (optional)
-└── README.md            # Documentation
+/plugin install telegram@claude-plugins-official
+/reload-plugins
 ```
 
-## License
+Check that `/telegram:configure` tab-completes. If not, restart your session.
 
-Please see each linked plugin for the relevant LICENSE file.
+**3. Give the server the token.**
 
-## Documentation
+```
+/telegram:configure 123456789:AAHfiqksKZ8...
+```
 
-For more information on developing Claude Code plugins, see the [official documentation](https://code.claude.com/docs/en/plugins).
+Writes `TELEGRAM_BOT_TOKEN=...` to `~/.claude/channels/telegram/.env`. You can also write that file by hand, or set the variable in your shell environment — shell takes precedence.
+
+**4. Relaunch with the channel flag.**
+
+The server won't connect without this — exit your session and start a new one:
+
+```sh
+claude --channels plugin:telegram@claude-plugins-official
+```
+
+**5. Pair.**
+
+DM your bot on Telegram — it replies with a 6-character pairing code. In your assistant session:
+
+```
+/telegram:access pair <code>
+```
+
+Your next DM reaches the assistant.
+
+> Unlike Discord, there's no server invite step — Telegram bots accept DMs immediately. Pairing handles the user-ID lookup so you never touch numeric IDs.
+
+**6. Lock it down.**
+
+Pairing is for capturing IDs. Once you're in, switch to `allowlist` so strangers don't get pairing-code replies. Ask Claude to do it, or `/telegram:access policy allowlist` directly.
+
+## Access control
+
+See **[ACCESS.md](./ACCESS.md)** for DM policies, groups, mention detection, delivery config, skill commands, and the `access.json` schema.
+
+Quick reference: IDs are **numeric user IDs** (get yours from [@userinfobot](https://t.me/userinfobot)). Default policy is `pairing`. `ackReaction` only accepts Telegram's fixed emoji whitelist.
+
+## Tools exposed to the assistant
+
+| Tool | Purpose |
+| --- | --- |
+| `reply` | Send to a chat. Takes `chat_id` + `text`, optionally `reply_to` (message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.png`/`.gif`/`.webp`) send as photos with inline preview; other types send as documents. Max 50MB each. Auto-chunks text; files send as separate messages after the text. Returns the sent message ID(s). |
+| `react` | Add an emoji reaction to a message by ID. **Only Telegram's fixed whitelist** is accepted (👍 👎 ❤ 🔥 👀 etc). |
+| `edit_message` | Edit a message the bot previously sent. Useful for "working…" → result progress updates. Only works on the bot's own messages. |
+
+Inbound messages trigger a typing indicator automatically — Telegram shows
+"botname is typing…" while the assistant works on a response.
+
+## Photos
+
+Inbound photos are downloaded to `~/.claude/channels/telegram/inbox/` and the
+local path is included in the `<channel>` notification so the assistant can
+`Read` it. Telegram compresses photos — if you need the original file, send it
+as a document instead (long-press → Send as File).
+
+## No history or search
+
+Telegram's Bot API exposes **neither** message history nor search. The bot
+only sees messages as they arrive — no `fetch_messages` tool exists. If the
+assistant needs earlier context, it will ask you to paste or summarize.
+
+This also means there's no `download_attachment` tool for historical messages
+— photos are downloaded eagerly on arrival since there's no way to fetch them
+later.
