@@ -507,6 +507,52 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
 await mcp.connect(new StdioServerTransport())
 
+bot.command('start', async ctx => {
+  await ctx.reply(
+    `👋 Hi! I'm a bridge between Telegram and Claude Code.\n\n` +
+    `How to set up:\n` +
+    `1. Send me any message here\n` +
+    `2. I'll give you a pairing code\n` +
+    `3. Run that code in Claude Code to link your account\n\n` +
+    `Once paired, your messages here go straight to Claude.`
+  )
+})
+
+bot.command('help', async ctx => {
+  await ctx.reply(
+    `I relay messages between Telegram and Claude Code.\n\n` +
+    `What works:\n` +
+    `- Text messages\n` +
+    `- Photos (with captions)\n` +
+    `- Replies to specific messages\n\n` +
+    `Use /start for setup instructions.`
+  )
+})
+
+bot.command('status', async ctx => {
+  const from = ctx.from
+  if (!from) return
+  const senderId = String(from.id)
+  const access = loadAccess()
+
+  if (access.allowFrom.includes(senderId)) {
+    const name = from.username ? `@${from.username}` : senderId
+    await ctx.reply(`Paired as ${name}.`)
+    return
+  }
+
+  for (const [code, p] of Object.entries(access.pending)) {
+    if (p.senderId === senderId) {
+      await ctx.reply(
+        `Pending pairing — run in Claude Code:\n\n/telegram:access pair ${code}`
+      )
+      return
+    }
+  }
+
+  await ctx.reply(`Not paired. Send me a message to get a pairing code.`)
+})
+
 bot.on('message:text', async ctx => {
   await handleInbound(ctx, ctx.message.text, undefined)
 })
@@ -597,5 +643,10 @@ void bot.start({
   onStart: info => {
     botUsername = info.username
     process.stderr.write(`telegram channel: polling as @${info.username}\n`)
+    void bot.api.setMyCommands([
+      { command: 'start', description: 'Welcome and setup guide' },
+      { command: 'help', description: 'What this bot can do' },
+      { command: 'status', description: 'Check your pairing status' },
+    ]).catch(() => {})
   },
 })
