@@ -550,6 +550,62 @@ process.stdin.on('close', shutdown)
 process.on('SIGTERM', shutdown)
 process.on('SIGINT', shutdown)
 
+// Commands are DM-only. Responding in groups would: (1) leak pairing codes via
+// /status to other group members, (2) confirm bot presence in non-allowlisted
+// groups, (3) spam channels the operator never approved. Silent drop matches
+// the gate's behavior for unrecognized groups.
+
+bot.command('start', async ctx => {
+  if (ctx.chat?.type !== 'private') return
+  const access = loadAccess()
+  if (access.dmPolicy === 'disabled') {
+    await ctx.reply(`This bot isn't accepting new connections.`)
+    return
+  }
+  await ctx.reply(
+    `This bot bridges Telegram to a Claude Code session.\n\n` +
+    `To pair:\n` +
+    `1. DM me anything — you'll get a 6-char code\n` +
+    `2. In Claude Code: /telegram:access pair <code>\n\n` +
+    `After that, DMs here reach that session.`
+  )
+})
+
+bot.command('help', async ctx => {
+  if (ctx.chat?.type !== 'private') return
+  await ctx.reply(
+    `Messages you send here route to a paired Claude Code session. ` +
+    `Text and photos are forwarded; replies and reactions come back.\n\n` +
+    `/start — pairing instructions\n` +
+    `/status — check your pairing state`
+  )
+})
+
+bot.command('status', async ctx => {
+  if (ctx.chat?.type !== 'private') return
+  const from = ctx.from
+  if (!from) return
+  const senderId = String(from.id)
+  const access = loadAccess()
+
+  if (access.allowFrom.includes(senderId)) {
+    const name = from.username ? `@${from.username}` : senderId
+    await ctx.reply(`Paired as ${name}.`)
+    return
+  }
+
+  for (const [code, p] of Object.entries(access.pending)) {
+    if (p.senderId === senderId) {
+      await ctx.reply(
+        `Pending pairing — run in Claude Code:\n\n/telegram:access pair ${code}`
+      )
+      return
+    }
+  }
+
+  await ctx.reply(`Not paired. Send me a message to get a pairing code.`)
+})
+
 bot.on('message:text', async ctx => {
   await handleInbound(ctx, ctx.message.text, undefined)
 })
@@ -654,6 +710,14 @@ void (async () => {
         onStart: info => {
           botUsername = info.username
           process.stderr.write(`telegram channel: polling as @${info.username}\n`)
+          void bot.api.setMyCommands(
+            [
+              { command: 'start', description: 'Welcome and setup guide' },
+              { command: 'help', description: 'What this bot can do' },
+              { command: 'status', description: 'Check your pairing status' },
+            ],
+            { scope: { type: 'all_private_chats' } },
+          ).catch(() => {})
         },
       })
       return // bot.stop() was called — clean exit from the loop
