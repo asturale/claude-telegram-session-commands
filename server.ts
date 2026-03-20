@@ -313,7 +313,7 @@ function checkApprovals(): void {
   }
 }
 
-if (!STATIC) setInterval(checkApprovals, 5000)
+if (!STATIC) setInterval(checkApprovals, 5000).unref()
 
 // Telegram caps messages at 4096 chars. Split long replies, preferring
 // paragraph boundaries when chunkMode is 'newline'.
@@ -515,6 +515,24 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 })
 
 await mcp.connect(new StdioServerTransport())
+
+// When Claude Code closes the MCP connection, stdin gets EOF. Without this
+// the bot keeps polling forever as a zombie, holding the token and blocking
+// the next session with 409 Conflict.
+let shuttingDown = false
+function shutdown(): void {
+  if (shuttingDown) return
+  shuttingDown = true
+  process.stderr.write('telegram channel: shutting down\n')
+  // bot.stop() signals the poll loop to end; the current getUpdates request
+  // may take up to its long-poll timeout to return. Force-exit after 2s.
+  setTimeout(() => process.exit(0), 2000)
+  void Promise.resolve(bot.stop()).finally(() => process.exit(0))
+}
+process.stdin.on('end', shutdown)
+process.stdin.on('close', shutdown)
+process.on('SIGTERM', shutdown)
+process.on('SIGINT', shutdown)
 
 bot.on('message:text', async ctx => {
   await handleInbound(ctx, ctx.message.text, undefined)
