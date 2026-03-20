@@ -341,7 +341,7 @@ const mcp = new Server(
     instructions: [
       'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
-      'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
+      'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
       '',
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message to update a message you previously sent (e.g. progress → result).',
       '',
@@ -387,6 +387,17 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           emoji: { type: 'string' },
         },
         required: ['chat_id', 'message_id', 'emoji'],
+      },
+    },
+    {
+      name: 'download_attachment',
+      description: 'Download a file attachment from a Telegram message to the local inbox. Use when the inbound <channel> meta shows attachment_file_id. Returns the local file path ready to Read. Telegram caps bot downloads at 20MB.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          file_id: { type: 'string', description: 'The attachment_file_id from inbound meta' },
+        },
+        required: ['file_id'],
       },
     },
     {
@@ -480,6 +491,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         ])
         return { content: [{ type: 'text', text: 'reacted' }] }
       }
+      case 'download_attachment': {
+        const file_id = args.file_id as string
+        const file = await bot.api.getFile(file_id)
+        if (!file.file_path) throw new Error('Telegram returned no file_path — file may have expired')
+        const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
+        const res = await fetch(url)
+        if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`)
+        const buf = Buffer.from(await res.arrayBuffer())
+        const ext = file.file_path.split('.').pop() ?? 'bin'
+        const uniqueId = file.file_unique_id ?? file_id.slice(0, 12)
+        const path = join(INBOX_DIR, `${Date.now()}-${uniqueId}.${ext}`)
+        mkdirSync(INBOX_DIR, { recursive: true })
+        writeFileSync(path, buf)
+        return { content: [{ type: 'text', text: path }] }
+      }
       case 'edit_message': {
         assertAllowedChat(args.chat_id as string)
         const edited = await bot.api.editMessageText(
@@ -537,10 +563,85 @@ bot.on('message:photo', async ctx => {
   })
 })
 
+bot.on('message:document', async ctx => {
+  const doc = ctx.message.document
+  const text = ctx.message.caption ?? `(document: ${doc.file_name ?? 'file'})`
+  await handleInbound(ctx, text, undefined, {
+    kind: 'document',
+    file_id: doc.file_id,
+    size: doc.file_size,
+    mime: doc.mime_type,
+    name: doc.file_name,
+  })
+})
+
+bot.on('message:voice', async ctx => {
+  const voice = ctx.message.voice
+  const text = ctx.message.caption ?? '(voice message)'
+  await handleInbound(ctx, text, undefined, {
+    kind: 'voice',
+    file_id: voice.file_id,
+    size: voice.file_size,
+    mime: voice.mime_type,
+  })
+})
+
+bot.on('message:audio', async ctx => {
+  const audio = ctx.message.audio
+  const text = ctx.message.caption ?? `(audio: ${audio.title ?? audio.file_name ?? 'audio'})`
+  await handleInbound(ctx, text, undefined, {
+    kind: 'audio',
+    file_id: audio.file_id,
+    size: audio.file_size,
+    mime: audio.mime_type,
+    name: audio.file_name,
+  })
+})
+
+bot.on('message:video', async ctx => {
+  const video = ctx.message.video
+  const text = ctx.message.caption ?? '(video)'
+  await handleInbound(ctx, text, undefined, {
+    kind: 'video',
+    file_id: video.file_id,
+    size: video.file_size,
+    mime: video.mime_type,
+    name: video.file_name,
+  })
+})
+
+bot.on('message:video_note', async ctx => {
+  const vn = ctx.message.video_note
+  await handleInbound(ctx, '(video note)', undefined, {
+    kind: 'video_note',
+    file_id: vn.file_id,
+    size: vn.file_size,
+  })
+})
+
+bot.on('message:sticker', async ctx => {
+  const sticker = ctx.message.sticker
+  const emoji = sticker.emoji ? ` ${sticker.emoji}` : ''
+  await handleInbound(ctx, `(sticker${emoji})`, undefined, {
+    kind: 'sticker',
+    file_id: sticker.file_id,
+    size: sticker.file_size,
+  })
+})
+
+type AttachmentMeta = {
+  kind: string
+  file_id: string
+  size?: number
+  mime?: string
+  name?: string
+}
+
 async function handleInbound(
   ctx: Context,
   text: string,
   downloadImage: (() => Promise<string | undefined>) | undefined,
+  attachment?: AttachmentMeta,
 ): Promise<void> {
   const result = gate(ctx)
 
@@ -588,6 +689,13 @@ async function handleInbound(
         user_id: String(from.id),
         ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),
         ...(imagePath ? { image_path: imagePath } : {}),
+        ...(attachment ? {
+          attachment_kind: attachment.kind,
+          attachment_file_id: attachment.file_id,
+          ...(attachment.size != null ? { attachment_size: String(attachment.size) } : {}),
+          ...(attachment.mime ? { attachment_mime: attachment.mime } : {}),
+          ...(attachment.name ? { attachment_name: attachment.name } : {}),
+        } : {}),
       },
     },
   })
