@@ -15,7 +15,7 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
-import { Bot, InputFile, type Context } from 'grammy'
+import { Bot, GrammyError, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
@@ -593,9 +593,33 @@ async function handleInbound(
   })
 }
 
-void bot.start({
-  onStart: info => {
-    botUsername = info.username
-    process.stderr.write(`telegram channel: polling as @${info.username}\n`)
-  },
-})
+// 409 Conflict = another getUpdates consumer is still active (zombie from a
+// previous session, or a second Claude Code instance). Retry with backoff
+// until the slot frees up instead of crashing on the first rejection.
+void (async () => {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await bot.start({
+        onStart: info => {
+          botUsername = info.username
+          process.stderr.write(`telegram channel: polling as @${info.username}\n`)
+        },
+      })
+      return // bot.stop() was called — clean exit from the loop
+    } catch (err) {
+      if (err instanceof GrammyError && err.error_code === 409) {
+        const delay = Math.min(1000 * attempt, 15000)
+        const detail = attempt === 1
+          ? ' — another instance is polling (zombie session, or a second Claude Code running?)'
+          : ''
+        process.stderr.write(
+          `telegram channel: 409 Conflict${detail}, retrying in ${delay / 1000}s\n`,
+        )
+        await new Promise(r => setTimeout(r, delay))
+        continue
+      }
+      process.stderr.write(`telegram channel: polling failed: ${err}\n`)
+      return
+    }
+  }
+})()
