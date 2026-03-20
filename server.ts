@@ -499,8 +499,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const res = await fetch(url)
         if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`)
         const buf = Buffer.from(await res.arrayBuffer())
-        const ext = file.file_path.split('.').pop() ?? 'bin'
-        const uniqueId = file.file_unique_id ?? file_id.slice(0, 12)
+        // file_path is from Telegram (trusted), but strip to safe chars anyway
+        // so nothing downstream can be tricked by an unexpected extension.
+        const rawExt = file.file_path.includes('.') ? file.file_path.split('.').pop()! : 'bin'
+        const ext = rawExt.replace(/[^a-zA-Z0-9]/g, '') || 'bin'
+        const uniqueId = (file.file_unique_id ?? '').replace(/[^a-zA-Z0-9_-]/g, '') || 'dl'
         const path = join(INBOX_DIR, `${Date.now()}-${uniqueId}.${ext}`)
         mkdirSync(INBOX_DIR, { recursive: true })
         writeFileSync(path, buf)
@@ -565,13 +568,14 @@ bot.on('message:photo', async ctx => {
 
 bot.on('message:document', async ctx => {
   const doc = ctx.message.document
-  const text = ctx.message.caption ?? `(document: ${doc.file_name ?? 'file'})`
+  const name = safeName(doc.file_name)
+  const text = ctx.message.caption ?? `(document: ${name ?? 'file'})`
   await handleInbound(ctx, text, undefined, {
     kind: 'document',
     file_id: doc.file_id,
     size: doc.file_size,
     mime: doc.mime_type,
-    name: doc.file_name,
+    name,
   })
 })
 
@@ -588,13 +592,14 @@ bot.on('message:voice', async ctx => {
 
 bot.on('message:audio', async ctx => {
   const audio = ctx.message.audio
-  const text = ctx.message.caption ?? `(audio: ${audio.title ?? audio.file_name ?? 'audio'})`
+  const name = safeName(audio.file_name)
+  const text = ctx.message.caption ?? `(audio: ${safeName(audio.title) ?? name ?? 'audio'})`
   await handleInbound(ctx, text, undefined, {
     kind: 'audio',
     file_id: audio.file_id,
     size: audio.file_size,
     mime: audio.mime_type,
-    name: audio.file_name,
+    name,
   })
 })
 
@@ -606,7 +611,7 @@ bot.on('message:video', async ctx => {
     file_id: video.file_id,
     size: video.file_size,
     mime: video.mime_type,
-    name: video.file_name,
+    name: safeName(video.file_name),
   })
 })
 
@@ -635,6 +640,13 @@ type AttachmentMeta = {
   size?: number
   mime?: string
   name?: string
+}
+
+// Filenames and titles are uploader-controlled. They land inside the <channel>
+// notification — delimiter chars would let the uploader break out of the tag
+// or forge a second meta entry.
+function safeName(s: string | undefined): string | undefined {
+  return s?.replace(/[<>\[\]\r\n;]/g, '_')
 }
 
 async function handleInbound(
