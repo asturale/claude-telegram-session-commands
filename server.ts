@@ -507,7 +507,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
 await mcp.connect(new StdioServerTransport())
 
+// Commands are DM-only. Responding in groups would: (1) leak pairing codes via
+// /status to other group members, (2) confirm bot presence in non-allowlisted
+// groups, (3) spam channels the operator never approved. Silent drop matches
+// the gate's behavior for unrecognized groups.
+
 bot.command('start', async ctx => {
+  if (ctx.chat?.type !== 'private') return
+  const access = loadAccess()
+  if (access.dmPolicy === 'disabled') {
+    await ctx.reply(`This bot isn't accepting new connections.`)
+    return
+  }
   await ctx.reply(
     `👋 Hi! I'm a bridge between Telegram and Claude Code.\n\n` +
     `How to set up:\n` +
@@ -519,6 +530,7 @@ bot.command('start', async ctx => {
 })
 
 bot.command('help', async ctx => {
+  if (ctx.chat?.type !== 'private') return
   await ctx.reply(
     `I relay messages between Telegram and Claude Code.\n\n` +
     `What works:\n` +
@@ -530,6 +542,7 @@ bot.command('help', async ctx => {
 })
 
 bot.command('status', async ctx => {
+  if (ctx.chat?.type !== 'private') return
   const from = ctx.from
   if (!from) return
   const senderId = String(from.id)
@@ -643,10 +656,13 @@ void bot.start({
   onStart: info => {
     botUsername = info.username
     process.stderr.write(`telegram channel: polling as @${info.username}\n`)
-    void bot.api.setMyCommands([
-      { command: 'start', description: 'Welcome and setup guide' },
-      { command: 'help', description: 'What this bot can do' },
-      { command: 'status', description: 'Check your pairing status' },
-    ]).catch(() => {})
+    void bot.api.setMyCommands(
+      [
+        { command: 'start', description: 'Welcome and setup guide' },
+        { command: 'help', description: 'What this bot can do' },
+        { command: 'status', description: 'Check your pairing status' },
+      ],
+      { scope: { type: 'all_private_chats' } },
+    ).catch(() => {})
   },
 })
