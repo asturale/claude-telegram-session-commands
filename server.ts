@@ -372,6 +372,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             items: { type: 'string' },
             description: 'Absolute file paths to attach. Images send as photos (inline preview); other types as documents. Max 50MB each.',
           },
+          format: {
+            type: 'string',
+            enum: ['text', 'markdownv2'],
+            description: "Rendering mode. 'markdownv2' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per MarkdownV2 rules. Default: 'text' (plain, no escaping needed).",
+          },
         },
         required: ['chat_id', 'text'],
       },
@@ -398,6 +403,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           chat_id: { type: 'string' },
           message_id: { type: 'string' },
           text: { type: 'string' },
+          format: {
+            type: 'string',
+            enum: ['text', 'markdownv2'],
+            description: "Rendering mode. 'markdownv2' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per MarkdownV2 rules. Default: 'text' (plain, no escaping needed).",
+          },
         },
         required: ['chat_id', 'message_id', 'text'],
       },
@@ -414,6 +424,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const text = args.text as string
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
         const files = (args.files as string[] | undefined) ?? []
+        const format = (args.format as string | undefined) ?? 'text'
+        const parseMode = format === 'markdownv2' ? 'MarkdownV2' as const : undefined
 
         assertAllowedChat(chat_id)
 
@@ -440,6 +452,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               (replyMode === 'all' || i === 0)
             const sent = await bot.api.sendMessage(chat_id, chunks[i], {
               ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
+              ...(parseMode ? { parse_mode: parseMode } : {}),
             })
             sentIds.push(sent.message_id)
           }
@@ -482,10 +495,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }
       case 'edit_message': {
         assertAllowedChat(args.chat_id as string)
+        const editFormat = (args.format as string | undefined) ?? 'text'
+        const editParseMode = editFormat === 'markdownv2' ? 'MarkdownV2' as const : undefined
         const edited = await bot.api.editMessageText(
           args.chat_id as string,
           Number(args.message_id),
           args.text as string,
+          ...(editParseMode ? [{ parse_mode: editParseMode }] : []),
         )
         const id = typeof edited === 'object' ? edited.message_id : args.message_id
         return { content: [{ type: 'text', text: `edited (id: ${id})` }] }
