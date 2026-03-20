@@ -618,6 +618,8 @@ void (async () => {
         await new Promise(r => setTimeout(r, delay))
         continue
       }
+      // bot.stop() mid-setup rejects with grammy's "Aborted delay" — expected, not an error.
+      if (err instanceof Error && err.message === 'Aborted delay') return
       process.stderr.write(`telegram channel: polling failed: ${err}\n`)
       return
     }
