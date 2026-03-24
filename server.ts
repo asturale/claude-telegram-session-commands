@@ -16,7 +16,7 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { Bot, GrammyError, InputFile, type Context } from 'grammy'
+import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
@@ -399,10 +399,12 @@ mcp.setNotificationHandler(
     const text =
       `🔐 Permission request [${request_id}]\n` +
       `${tool_name}: ${description}\n` +
-      `${input_preview}\n\n` +
-      `Reply "yes ${request_id}" to allow or "no ${request_id}" to deny.`
+      `${input_preview}`
+    const keyboard = new InlineKeyboard()
+      .text('✅ Allow', `perm:allow:${request_id}`)
+      .text('❌ Deny', `perm:deny:${request_id}`)
     for (const chat_id of access.allowFrom) {
-      void bot.api.sendMessage(chat_id, text).catch(e => {
+      void bot.api.sendMessage(chat_id, text, { reply_markup: keyboard }).catch(e => {
         process.stderr.write(`permission_request send to ${chat_id} failed: ${e}\n`)
       })
     }
@@ -681,6 +683,37 @@ bot.command('status', async ctx => {
   }
 
   await ctx.reply(`Not paired. Send me a message to get a pairing code.`)
+})
+
+// Inline-button handler for permission requests. Callback data is
+// `perm:allow:<id>` or `perm:deny:<id>` — set when the request was sent.
+// Security mirrors the text-reply path: allowFrom must contain the sender.
+bot.on('callback_query:data', async ctx => {
+  const data = ctx.callbackQuery.data
+  const m = /^perm:(allow|deny):([a-km-z]{5})$/.exec(data)
+  if (!m) {
+    await ctx.answerCallbackQuery().catch(() => {})
+    return
+  }
+  const access = loadAccess()
+  const senderId = String(ctx.from.id)
+  if (!access.allowFrom.includes(senderId)) {
+    await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+    return
+  }
+  const [, behavior, request_id] = m
+  void mcp.notification({
+    method: 'notifications/claude/channel/permission',
+    params: { request_id, behavior },
+  })
+  const label = behavior === 'allow' ? '✅ Allowed' : '❌ Denied'
+  await ctx.answerCallbackQuery({ text: label }).catch(() => {})
+  // Replace buttons with the outcome so the same request can't be answered
+  // twice and the chat history shows what was chosen.
+  const msg = ctx.callbackQuery.message
+  if (msg && 'text' in msg && msg.text) {
+    await ctx.editMessageText(`${msg.text}\n\n${label}`).catch(() => {})
+  }
 })
 
 bot.on('message:text', async ctx => {
