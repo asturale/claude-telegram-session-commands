@@ -27,8 +27,9 @@ These are Claude Code commands — run `claude` to start a session first.
 Install the plugin:
 ```
 /plugin install telegram@claude-plugins-official
-/reload-plugins
 ```
+
+If the install summary says to run `/reload-plugins`, run it — otherwise the plugin is active right away. (This plugin ships an MCP server, which can't always be activated mid-session.)
 
 **3. Give the server the token.**
 
