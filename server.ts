@@ -708,7 +708,8 @@ bot.command('help', async ctx => {
     `/status — check your pairing state` +
     (CLEAR_CMD ? `\n/clear [prompt] — start a fresh session` : '') +
     (BTW_CMD ? `\n/btw <task> — run a side task in a separate session` : '') +
-    (MODEL_CMD ? `\n/model — switch the session's model` : '')
+    (MODEL_CMD ? `\n/model — switch the session's model` : '') +
+    (MODE_CMD ? `\n/mode — switch the permission mode` : '')
   )
 })
 
@@ -742,21 +743,30 @@ bot.command('status', async ctx => {
 //   TELEGRAM_MODEL_CMD  — run as `<cmd> <model>`: restart on another model
 //   TELEGRAM_MODELS     — button list for /model, `label=model,...`
 //                         (default: opus, sonnet, haiku)
+//   TELEGRAM_MODE_CMD   — run as `<cmd> <mode>`: restart in another
+//                         permission mode
+//   TELEGRAM_MODES      — button list for /mode, `label=mode,...`
+//                         (default: auto, acceptEdits, manual)
 // They are handled here rather than forwarded, so they still work while the
 // session is busy or stuck on a prompt. The scripts run detached: /clear and
 // /model typically replace the session that owns this server process.
 const CLEAR_CMD = process.env.TELEGRAM_CLEAR_CMD
 const BTW_CMD = process.env.TELEGRAM_BTW_CMD
 const MODEL_CMD = process.env.TELEGRAM_MODEL_CMD
-const MODELS: { label: string; model: string }[] =
-  (process.env.TELEGRAM_MODELS ?? 'opus=opus,sonnet=sonnet,haiku=haiku')
+const MODE_CMD = process.env.TELEGRAM_MODE_CMD
+
+function parseChoices(spec: string): { label: string; value: string }[] {
+  return spec
     .split(',')
     .map(e => e.trim())
     .filter(Boolean)
     .map(e => {
-      const [label, model] = e.includes('=') ? e.split('=', 2) : [e, e]
-      return { label: label.trim(), model: model.trim() }
+      const [label, value] = e.includes('=') ? e.split('=', 2) : [e, e]
+      return { label: label.trim(), value: value.trim() }
     })
+}
+const MODELS = parseChoices(process.env.TELEGRAM_MODELS ?? 'opus=opus,sonnet=sonnet,haiku=haiku')
+const MODES = parseChoices(process.env.TELEGRAM_MODES ?? 'auto,acceptEdits,manual')
 
 // Stricter than dmCommandGate: these act on the machine, so only allowlisted
 // senders — never someone who merely has a pending pairing.
@@ -798,31 +808,41 @@ bot.command('btw', async ctx => {
   runDetached(BTW_CMD, [task])
 })
 
-bot.command('model', async ctx => {
-  if (!ownerGate(ctx)) return
-  if (!MODEL_CMD) {
-    await ctx.reply('/model is not configured (TELEGRAM_MODEL_CMD).')
-    return
-  }
-  const kb = new InlineKeyboard()
-  MODELS.forEach((m, i) => kb.text(m.label, `model:${i}`))
-  await ctx.reply('Switch the session to:', { reply_markup: kb })
-})
+// /model and /mode: pick from inline buttons, then hand the value to the
+// configured command. Callback data is `<kind>:<index>`.
+const switchers = {
+  model: { cmd: MODEL_CMD, env: 'TELEGRAM_MODEL_CMD', choices: MODELS, prompt: 'Switch the session to:' },
+  mode: { cmd: MODE_CMD, env: 'TELEGRAM_MODE_CMD', choices: MODES, prompt: 'Switch the permission mode to:' },
+}
 
-bot.callbackQuery(/^model:(\d+)$/, async ctx => {
+for (const [kind, sw] of Object.entries(switchers)) {
+  bot.command(kind, async ctx => {
+    if (!ownerGate(ctx)) return
+    if (!sw.cmd) {
+      await ctx.reply(`/${kind} is not configured (${sw.env}).`)
+      return
+    }
+    const kb = new InlineKeyboard()
+    sw.choices.forEach((c, i) => kb.text(c.label, `${kind}:${i}`))
+    await ctx.reply(sw.prompt, { reply_markup: kb })
+  })
+}
+
+bot.callbackQuery(/^(model|mode):(\d+)$/, async ctx => {
+  const sw = switchers[ctx.match[1] as keyof typeof switchers]
   const access = loadAccess()
-  if (!access.allowFrom.includes(String(ctx.from.id)) || !MODEL_CMD) {
+  if (!access.allowFrom.includes(String(ctx.from.id)) || !sw.cmd) {
     await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
     return
   }
-  const choice = MODELS[Number(ctx.match[1])]
+  const choice = sw.choices[Number(ctx.match[2])]
   if (!choice) {
     await ctx.answerCallbackQuery().catch(() => {})
     return
   }
   await ctx.answerCallbackQuery({ text: `Switching to ${choice.label}…` }).catch(() => {})
   await ctx.editMessageText(`Switching to ${choice.label}…`).catch(() => {})
-  runDetached(MODEL_CMD, [choice.model])
+  runDetached(sw.cmd, [choice.value])
 })
 
 // Inline-button handler for permission requests. Callback data is
@@ -1112,6 +1132,7 @@ void (async () => {
               ...(CLEAR_CMD ? [{ command: 'clear', description: 'Start a fresh session' }] : []),
               ...(BTW_CMD ? [{ command: 'btw', description: 'Run a side task in a separate session' }] : []),
               ...(MODEL_CMD ? [{ command: 'model', description: "Switch the session's model" }] : []),
+              ...(MODE_CMD ? [{ command: 'mode', description: 'Switch the permission mode' }] : []),
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})

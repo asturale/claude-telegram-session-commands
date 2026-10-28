@@ -110,14 +110,18 @@ use them. Each one runs an operator-supplied command, configured in
 | `/clear [prompt]` | `TELEGRAM_CLEAR_CMD` | `<cmd> [prompt]`: start a fresh session |
 | `/btw <task>` | `TELEGRAM_BTW_CMD` | `<cmd> <task>`: run a side task in a separate session |
 | `/model` | `TELEGRAM_MODEL_CMD` | `<cmd> <model>`, after picking from inline buttons |
+| `/mode` | `TELEGRAM_MODE_CMD` | `<cmd> <mode>`, after picking from inline buttons |
 
 `TELEGRAM_MODELS` sets the `/model` buttons as `label=model,...`
 (default `opus=opus,sonnet=sonnet,haiku=haiku`).
+`TELEGRAM_MODES` does the same for `/mode` (default `auto,acceptEdits,manual`).
+In `manual` mode, permission prompts reach Telegram as Allow/Deny buttons.
 
 The command is spawned detached, because `/clear` and `/model` usually replace
 the session that owns the bot process. A typical script starts the new session
 (`claude --bg --channels plugin:telegram@claude-plugins-official ...`, adding
-`--resume <session-id> --fork-session --model <model>` for `/model`), waits for
+`--resume <session-id> --fork-session` plus `--model` or `--permission-mode`
+for `/model` and `/mode`), waits for
 its poller to take over `bot.pid` in the state dir, then stops the old session.
 A `/btw` session should run without this plugin (only one poller per bot token
 can run) and report back through the Bot API's `sendMessage`.
