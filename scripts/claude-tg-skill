@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """/skill (TELEGRAM_SKILL_CMD): run a skill in the Telegram session.
   claude-tg-skill list [n]       lines "<name>\\t<label>": skills you can invoke,
-                                 from the n-th on, plus "page-<n>" lines to page through
+                                 from the n-th on, plus "page-<n>" lines to page through;
+                                 skills sharing a plugin or a "<prefix>-" are one
+                                 "open-g:<group>" line
+  claude-tg-skill list g:<group>[:n]  the skills in that group
   claude-tg-skill info <name>    what the skill does (its description)
   claude-tg-skill <name> [text]  type "/<name> [text]" into the session
 
@@ -21,7 +24,7 @@ HOME = Path.home()
 here = Path(__file__).resolve().parent
 os.environ["PATH"] = f"{here}:{HOME}/.local/bin:" + os.environ.get("PATH", "")
 LOG = HOME / ".local/state/claude-tg/session.log"
-SHOW = 8
+SHOW = 10
 NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,40}$")
 
 
@@ -106,18 +109,54 @@ def log(text):
 if len(sys.argv) < 2:
     sys.exit("usage: claude-tg-skill list [n] | info <name> | <name> [text]")
 
+def group_of(name):
+    """Plugin skills group by plugin, others by the part before the first "-"."""
+    if ":" in name:
+        return name.split(":", 1)[0]
+    return name.split("-", 1)[0] if "-" in name else None
+
+
+def page(entries, offset, prefix):
+    """One page of entries, plus "page-" lines (prefix + offset) to page."""
+    for value, label in entries[offset:offset + SHOW]:
+        print(f"{value}\t{label}")
+    if offset:
+        print(f"page-{prefix}{max(offset - SHOW, 0)}\t◂ Previous")
+    if len(entries) > offset + SHOW:
+        print(f"page-{prefix}{offset + SHOW}\tMore ▸")
+
+
 if sys.argv[1] == "list":
+    # "list [n]" is the top level from entry n; "list g:<group>[:n]" one group.
+    arg = sys.argv[2] if len(sys.argv) > 2 else "0"
+    group, _, n = arg[2:].rpartition(":") if arg.startswith("g:") else ("", "", arg)
+    if arg.startswith("g:") and not group:
+        group, n = n, "0"
     try:
-        offset = max(int(sys.argv[2]), 0) if len(sys.argv) > 2 else 0
+        offset = max(int(n), 0)
     except ValueError:
         offset = 0
     names = list(skills())
-    for name in names[offset:offset + SHOW]:
-        print(f"{name}\t/{name}")
-    if offset:
-        print(f"page-{max(offset - SHOW, 0)}\t◂ Previous")
-    if len(names) > offset + SHOW:
-        print(f"page-{offset + SHOW}\tMore ▸")
+    groups = {}
+    for name in names:
+        if group_of(name):
+            groups.setdefault(group_of(name), []).append(name)
+    if group:
+        members = groups.get(group, [])
+        page([(m, f"/{m}") for m in members], offset, f"g:{group}:")
+        print("page-0\t◂ Back")
+        sys.exit(0)
+    # A group of one is just that skill; "open-" lines open a group.
+    entries, seen = [], set()
+    for name in names:
+        g = group_of(name)
+        if g and len(groups[g]) > 1:
+            if g not in seen:
+                seen.add(g)
+                entries.append((f"open-g:{g}", f"📁 {g} ({len(groups[g])})"))
+        else:
+            entries.append((name, f"/{name}"))
+    page(entries, offset, "")
     sys.exit(0)
 
 if sys.argv[1] == "info":
