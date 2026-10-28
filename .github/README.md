@@ -81,7 +81,7 @@ TELEGRAM_PROGRESS_MAX_MINUTES=15    # stop following after this
 | `TELEGRAM_USAGE_CMD` | `<cmd>`; stdout is the reply (30 s timeout) |
 | `TELEGRAM_STATUS_CMD` | `<cmd>`; stdout is appended to `/status` (30 s timeout) |
 | `TELEGRAM_MODEL_CMD`, `TELEGRAM_MODE_CMD`, `TELEGRAM_EFFORT_CMD` | `<cmd> <value>` |
-| `TELEGRAM_RESUME_CMD` | `<cmd> list` prints `value<TAB>label` lines; `<cmd> <value>` on tap |
+| `TELEGRAM_RESUME_CMD` | `<cmd> list` prints `value<TAB>label` lines; `<cmd> <value>` on tap. A line with value `page-<n>` becomes a paging button: tapping it runs `<cmd> list <n>` and replaces the buttons |
 | `TELEGRAM_TASKS_CMD` | `<cmd> list` as above; `<cmd> result <value>` or `<cmd> stop <value>` on tap, stdout is the reply |
 | `TELEGRAM_PROGRESS_CMD` | `<cmd>`, repeatedly; stdout is the message, exit 0 = still busy, anything else = done |
 

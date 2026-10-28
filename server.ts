@@ -767,6 +767,7 @@ bot.command('status', async ctx => {
 //   TELEGRAM_MODE_CMD   + TELEGRAM_MODES    /mode   (default auto, acceptEdits, manual)
 //   TELEGRAM_EFFORT_CMD + TELEGRAM_EFFORTS  /effort (default low … max)
 // Pickers — `<cmd> list` prints `value<TAB>label` lines, one button row each:
+//   (a `page-<n>` line is a paging button: `<cmd> list <n>`)
 //   TELEGRAM_RESUME_CMD  /resume: `<cmd> <value>` (detached) on tap
 //   TELEGRAM_TASKS_CMD   /tasks: `<cmd> result <value>` or `<cmd> stop <value>`,
 //                        stdout is the reply
@@ -977,13 +978,33 @@ for (const [kind, sw] of Object.entries(switchers)) {
 
 // Pickers: `<cmd> list` prints `value<TAB>label` lines; each becomes a button
 // row. Callback data is `pick:<name>:<action>:<value>`, so values are limited
-// to a safe charset that fits Telegram's 64-byte callback data.
+// to a safe charset that fits Telegram's 64-byte callback data. A line with
+// value `page-<n>` is a paging button instead: tapping it runs `<cmd> list <n>`
+// and replaces the buttons in place. Paging buttons share the last row.
 const PICK_VALUE = /^[A-Za-z0-9_.-]{1,40}$/
 const pickers = {
   resume: { env: 'TELEGRAM_RESUME_CMD', description: 'Go back to an earlier conversation',
     prompt: 'Resume which conversation?', empty: 'No earlier conversations found.' },
   tasks: { env: 'TELEGRAM_TASKS_CMD', description: 'Side tasks: result or stop',
     prompt: 'Side tasks (tap for the result):', empty: 'No side tasks running.' },
+}
+
+// Button rows for one page of `<cmd> list [offset]`, or null if it printed none.
+function pickerKeyboard(name: string, text: string): InlineKeyboard | null {
+  const items = text.split('\n')
+    .map(l => l.split('\t'))
+    .filter(([value, label]) => label && PICK_VALUE.test(value))
+  if (items.length === 0) return null
+  const kb = new InlineKeyboard()
+  const pages: [string, string][] = []
+  for (const [value, label] of items) {
+    const page = /^page-(\d{1,6})$/.exec(value)
+    if (page) pages.push([label, page[1]])
+    else if (name === 'tasks') kb.text(label, `pick:tasks:result:${value}`).text('Stop', `pick:tasks:stop:${value}`).row()
+    else kb.text(label, `pick:${name}:go:${value}`).row()
+  }
+  for (const [label, offset] of pages) kb.text(label, `pick:${name}:page:${offset}`)
+  return kb
 }
 
 for (const [name, pk] of Object.entries(pickers)) {
@@ -1000,28 +1021,29 @@ for (const [name, pk] of Object.entries(pickers)) {
       await ctx.reply(text)
       return
     }
-    const items = text.split('\n')
-      .map(l => l.split('\t'))
-      .filter(([value, label]) => label && PICK_VALUE.test(value))
-    if (items.length === 0) {
+    const kb = pickerKeyboard(name, text)
+    if (!kb) {
       await ctx.reply(pk.empty)
       return
-    }
-    const kb = new InlineKeyboard()
-    for (const [value, label] of items) {
-      if (name === 'tasks') kb.text(label, `pick:tasks:result:${value}`).text('Stop', `pick:tasks:stop:${value}`).row()
-      else kb.text(label, `pick:${name}:go:${value}`).row()
     }
     await ctx.reply(pk.prompt, { reply_markup: kb })
   })
 }
 
-bot.callbackQuery(/^pick:(resume|tasks):(go|result|stop):([A-Za-z0-9_.-]{1,40})$/, async ctx => {
+bot.callbackQuery(/^pick:(resume|tasks):(go|result|stop|page):([A-Za-z0-9_.-]{1,40})$/, async ctx => {
   if (!(await ownerCallback(ctx))) return
   const [, name, action, value] = ctx.match
   const cmd = process.env[pickers[name as keyof typeof pickers].env]
   if (!cmd) {
     await ctx.answerCallbackQuery().catch(() => {})
+    return
+  }
+  if (action === 'page') {
+    await ctx.answerCallbackQuery().catch(() => {})
+    const { text, ok } = await runOutput(cmd, ['list', value])
+    const kb = ok ? pickerKeyboard(name, text) : null
+    if (kb) await ctx.editMessageReplyMarkup({ reply_markup: kb }).catch(() => {})
+    else await ctx.editMessageText(ok ? pickers[name as keyof typeof pickers].empty : text).catch(() => {})
     return
   }
   if (name === 'resume') {

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """/resume (TELEGRAM_RESUME_CMD).
-  claude-tg-resume list          lines "<session-id>\\t<label>": recent conversations
+  claude-tg-resume list [n]      lines "<session-id>\\t<label>": recent conversations
+                                 from the n-th on, plus "page-<n>" lines to page through
   claude-tg-resume <session-id>  replace the Telegram session with a fork of it
 
 Lists conversations from the project of CLAUDE_TG_CWD (default: your home
@@ -57,7 +58,7 @@ def first_prompt(path):
 
 
 if len(sys.argv) < 2:
-    sys.exit("usage: claude-tg-resume list | <session-id>")
+    sys.exit("usage: claude-tg-resume list [n] | <session-id>")
 
 if sys.argv[1] != "list":
     os.execvp("claude-tg-session", ["claude-tg-session", "resume", sys.argv[1]])
@@ -66,10 +67,14 @@ if sys.argv[1] != "list":
 # with every non-alphanumeric character replaced by "-".
 cwd = str(Path(setting("CLAUDE_TG_CWD", str(Path.home()))).resolve())
 project = Path.home() / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", cwd)
+try:
+    offset = max(int(sys.argv[2]), 0) if len(sys.argv) > 2 else 0
+except ValueError:
+    offset = 0
 cur = json.loads(subprocess.run(["claude-tg-current"], capture_output=True, text=True,
                                 timeout=30).stdout or "{}")
 files = sorted(project.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
-shown, seen = 0, set()
+found, seen = 0, set()
 for f in files[:400]:
     if f.stem == cur.get("sessionId"):
         continue
@@ -78,9 +83,15 @@ for f in files[:400]:
     if not p or p in seen:
         continue
     seen.add(p)
+    found += 1
+    if found > offset + SHOW:  # one extra: are there older ones?
+        break
+    if found <= offset:
+        continue
     when = datetime.fromtimestamp(f.stat().st_mtime).strftime("%m-%d %H:%M")
     label = p if len(p) <= 38 else p[:37] + "…"
     print(f"{f.stem}\t{when} {label}")
-    shown += 1
-    if shown >= SHOW:
-        break
+if offset:
+    print(f"page-{max(offset - SHOW, 0)}\t◂ Newer")
+if found > offset + SHOW:
+    print(f"page-{offset + SHOW}\tOlder ▸")
