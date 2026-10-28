@@ -25,6 +25,12 @@
  *   /sessions          list sessions; tap one to switch, ✕ to close it
  *   /new [prompt]      pick a model, then `TELEGRAM_NEW_CMD <model> [prompt]`
  *   /close             close the active session (`TELEGRAM_CLOSE_CMD`)
+ *   /name [name]       name the active session (empty: back to the model name)
+ * Names are kept per conversation in session-names.json, so scripts (such as a
+ * /resume picker) can show them too, and carry over to a session's replacement.
+ * With TELEGRAM_AUTO_NEW=1, closing the last session through /close or ✕ opens
+ * a fresh one on TELEGRAM_DEFAULT_MODEL (default: the first TELEGRAM_MODELS
+ * entry); at most once a minute, and never after a crash.
  * Commands run with TELEGRAM_SESSION_PID set to the server.ts pid of the
  * session they concern (for /new: the active one, to copy settings from).
  * TELEGRAM_SESSION_INFO_CMD, run the same way, prints JSON with optional
@@ -36,6 +42,9 @@
  * the relay. Before restarting a session in place (/clear, /model …), a script
  * can write that pid to relay-handover; the next session to connect within two
  * minutes then takes over its number instead of getting a new one.
+ *
+ * A script can also switch the active session: connect to relay.sock and send
+ * {"t": "use", "pid": <server.ts pid>}; the relay answers {"ok": true|false}.
  */
 
 import { Api, type Bot } from 'grammy'
@@ -55,6 +64,7 @@ const LOG = join(STATE_DIR, 'relay.log')
 const BOT_PID = join(STATE_DIR, 'bot.pid')
 const HANDOVER = join(STATE_DIR, 'relay-handover')
 const STATE_FILE = join(STATE_DIR, 'relay-state.json')
+const NAMES_FILE = join(STATE_DIR, 'session-names.json')
 const HANDOVER_MS = 120_000
 const RELAY_PATH = import.meta.path
 const VERSION = createHash('sha256').update(readFileSync(RELAY_PATH)).digest('hex').slice(0, 12)
@@ -104,6 +114,7 @@ export function startRelayClient(o: {
     { command: 'sessions', description: 'Open sessions: switch or close', help: '/sessions — open sessions: switch or close' },
     { command: 'new', description: 'Open an extra session', help: '/new [prompt] — open an extra session' },
     { command: 'close', description: 'Close the active session', help: '/close — close the active session' },
+    { command: 'name', description: 'Name the active session', help: '/name [name] — name the active session (empty: model name)' },
   )
 
   let state = { label: '', active: true, multi: false }
@@ -205,10 +216,13 @@ type Client = {
   sock: Socket
   pid: number
   slot: number
+  sessionId: string
+  name: string
   model: string
   status: string
   lastActive: number
   replaced: boolean
+  closing: boolean
 }
 
 async function runRelay(): Promise<void> {
@@ -234,6 +248,10 @@ async function runRelay(): Promise<void> {
       const [label, value] = e.includes('=') ? e.split('=', 2) : [e, e]
       return { label: label.trim(), value: value.trim() }
     })
+  const AUTO_NEW = process.env.TELEGRAM_AUTO_NEW === '1'
+  const DEFAULT_MODEL = process.env.TELEGRAM_DEFAULT_MODEL ?? MODELS[0]?.value ?? ''
+  const AUTO_NEW_MS = 60_000
+  let lastAutoNew = 0
 
   // One relay at a time.
   try {
@@ -281,7 +299,26 @@ async function runRelay(): Promise<void> {
   }
   const byPid = (pid: number) => clients.find(c => c.pid === pid) ?? null
   const shortModel = (m: string) => m.replace(/\[.*\]$/, '').replace(/^claude-/, '').replace(/[-.\d]+$/, '')
-  const label = (c: Client) => (c.model ? `${c.slot}·${shortModel(c.model)}` : `${c.slot}`)
+  const label = (c: Client) =>
+    c.name ? `${c.slot}·${c.name}` : c.model ? `${c.slot}·${shortModel(c.model)}` : `${c.slot}`
+  const loadNames = (): Record<string, string> => {
+    try {
+      return JSON.parse(readFileSync(NAMES_FILE, 'utf8'))
+    } catch {
+      return {}
+    }
+  }
+  const saveName = (c: Client) => {
+    if (!c.sessionId) return
+    const names = loadNames()
+    if (c.name) names[c.sessionId] = c.name
+    else delete names[c.sessionId]
+    try {
+      writeFileSync(NAMES_FILE, JSON.stringify(names, null, 1))
+    } catch (e) {
+      log(`saving names failed: ${e}`)
+    }
+  }
   const statusText = (c: Client) => (c.status === 'busy' ? 'busy' : c.status === 'idle' ? 'idle' : c.status)
   const notify = (text: string) => {
     for (const chat of ownerChats()) void api.sendMessage(chat, text).catch(e => log(`notify failed: ${e}`))
@@ -295,7 +332,9 @@ async function runRelay(): Promise<void> {
       writeFileSync(STATE_FILE, JSON.stringify({
         multi,
         active: active?.pid ?? null,
-        sessions: clients.map(c => ({ pid: c.pid, slot: c.slot, label: label(c), model: c.model, status: c.status })),
+        sessions: clients.map(c => ({
+          pid: c.pid, slot: c.slot, label: label(c), name: c.name, sessionId: c.sessionId, model: c.model, status: c.status,
+        })),
       }))
     } catch {}
   }
@@ -354,7 +393,10 @@ async function runRelay(): Promise<void> {
     }
     await Promise.race([Promise.all(clients.map(refresh)), new Promise(r => setTimeout(r, 10000))])
     const rows = [...clients].sort((a, b) => a.slot - b.slot).map(c => [
-      { text: `${c === active ? '● ' : ''}${label(c)}${c.status ? ` · ${statusText(c)}` : ''}`, callback_data: `relay:use:${c.pid}` },
+      {
+        text: `${c === active ? '● ' : ''}${label(c)}${c.name && c.model ? ` (${shortModel(c.model)})` : ''}${c.status ? ` · ${statusText(c)}` : ''}`,
+        callback_data: `relay:use:${c.pid}`,
+      },
       { text: '✕', callback_data: `relay:ask:${c.pid}` },
     ])
     if (NEW_CMD) rows.push([{ text: '+ New session', callback_data: 'relay:newmenu' }])
@@ -387,14 +429,29 @@ async function runRelay(): Promise<void> {
     }).catch(() => {})
   }
 
+  const nameSession = async (chat: string, c: Client | null, name: string) => {
+    if (!c) {
+      await api.sendMessage(chat, 'No active session.').catch(() => {})
+      return
+    }
+    const before = label(c)
+    c.name = name.replace(/\s+/g, ' ').slice(0, 24)
+    saveName(c)
+    pushState()
+    await api.sendMessage(chat, c.name
+      ? `Session ${before} is now called ${label(c)}.`
+      : `Session ${before} is back to its model name: ${label(c)}.`).catch(() => {})
+  }
+
   const handleCommand = async (u: Update): Promise<boolean> => {
     const m = u.message
     if (!m || m.chat.type !== 'private' || !owner(m.from?.id)) return false
-    const cm = /^\/(sessions|new|close)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(m.text ?? '')
+    const cm = /^\/(sessions|new|close|name)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(m.text ?? '')
     if (!cm) return false
     const chat = String(m.chat.id)
     if (cm[1] === 'sessions') await sessionsList(chat)
     else if (cm[1] === 'new') await newMenu(chat, (cm[2] ?? '').trim())
+    else if (cm[1] === 'name') await nameSession(chat, active, (cm[2] ?? '').trim())
     else await askClose(chat, active)
     return true
   }
@@ -440,6 +497,7 @@ async function runRelay(): Promise<void> {
           await answer('Not configured (TELEGRAM_CLOSE_CMD).')
           break
         }
+        c.closing = true
         await answer('Closing…')
         await edit(`Closing session ${label(c)}…`)
         void runWith(CLOSE_CMD, [], c.pid, true)
@@ -546,7 +604,16 @@ async function runRelay(): Promise<void> {
   const server = createServer(sock => {
     let client: Client | null = null
     onLines(sock, msg => {
-      if (msg.t === 'hello') {
+      if (msg.t === 'use' && !client) {
+        // From a script, not a session: switch the active session.
+        const c = byPid(Number(msg.pid))
+        if (c) {
+          setActive(c)
+          notify(`→ Now talking to ${label(c)}.`)
+        }
+        writeLine(sock, { ok: !!c })
+        sock.end()
+      } else if (msg.t === 'hello') {
         if (msg.version !== VERSION) {
           // A session runs a newer (or older) relay.ts: make way for it.
           void shutdown(`version ${msg.version} connected, mine is ${VERSION}`)
@@ -565,8 +632,15 @@ async function runRelay(): Promise<void> {
         } else {
           for (slot = 1; clients.some(c => c.slot === slot); slot++);
         }
-        client = { sock, pid: Number(msg.pid), slot, model: inherited?.model ?? '', status: '', lastActive: Date.now(), replaced: false }
+        const sessionId = String(msg.sessionId ?? '')
+        client = {
+          sock, pid: Number(msg.pid), slot, sessionId,
+          name: inherited?.name || (sessionId && loadNames()[sessionId]) || '',
+          model: inherited?.model ?? '', status: '', lastActive: Date.now(), replaced: false, closing: false,
+        }
         clients.push(client)
+        // A fork (/model, /clear …) gets a new conversation id: keep the name.
+        if (inherited?.name) saveName(client)
         log(`session ${slot} connected (pid ${client.pid}${inherited ? `, replaces ${inherited.pid}` : ''})`)
         setActive(client)
         flushWaiting()
@@ -590,12 +664,20 @@ async function runRelay(): Promise<void> {
       } else {
         pushState()
       }
-      if (!c.replaced) {
-        notify(
-          `Session ${label(c)} closed. ` +
-          (active ? `Now talking to ${label(active)}.` : 'No sessions open; start one with /new.'),
-        )
+      if (c.replaced) return
+      const autoNew = c.closing && !active && AUTO_NEW && !!NEW_CMD && !!DEFAULT_MODEL &&
+        Date.now() - lastAutoNew > AUTO_NEW_MS
+      if (autoNew) {
+        lastAutoNew = Date.now()
+        const m = MODELS.find(x => x.value === DEFAULT_MODEL)?.label ?? DEFAULT_MODEL
+        notify(`Session ${label(c)} closed. Opening a fresh session on ${m}…`)
+        void runWith(NEW_CMD!, [DEFAULT_MODEL], undefined, true)
+        return
       }
+      notify(
+        `Session ${label(c)} closed. ` +
+        (active ? `Now talking to ${label(active)}.` : 'No sessions open; start one with /new.'),
+      )
     })
   })
   server.on('error', err => {

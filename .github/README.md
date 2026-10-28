@@ -151,6 +151,7 @@ Bot API itself.
 | `/sessions` | Open sessions as buttons: tap one to switch to it, ✕ to close it | `TELEGRAM_SESSION_INFO_CMD` (optional) |
 | `/new [prompt]` | Pick a model, then open an extra session next to the others | `TELEGRAM_NEW_CMD`, `TELEGRAM_MODELS` |
 | `/close` | Close the active session, after a confirmation | `TELEGRAM_CLOSE_CMD` |
+| `/name [name]` | Name the active session, so its label reads `2·mail` instead of `2·sonnet`; no name goes back to the model | — |
 
 - Plain messages go to the active session. A swipe-reply goes to the session
   that sent the message you reply to, and makes that session active. A button
@@ -171,8 +172,20 @@ Bot API itself.
   over the old session's number and becomes active. Waiting for `bot.pid` to
   change still works.
 - `relay-state.json` in the state directory lists the open sessions with their
-  labels. A script that sends to Telegram on its own can use it to add the same
-  label.
+  labels, names and conversation ids. A script that sends to Telegram on its
+  own can use it to add the same label.
+- Names are stored per conversation id in `session-names.json` in the state
+  directory, so a `/resume` picker can show them for closed conversations too.
+  A session that replaces another one through `relay-handover` keeps its name.
+- A script can switch the active session: connect to `relay.sock` and send
+  `{"t": "use", "pid": <server pid>}` followed by a newline. The relay answers
+  `{"ok": true}` or `{"ok": false}`. A `/resume` picker can use this to offer
+  the open sessions next to closed ones.
+- With `TELEGRAM_AUTO_NEW=1`, closing the last open session through `/close`
+  or ✕ opens a fresh one: `TELEGRAM_NEW_CMD <model>` on
+  `TELEGRAM_DEFAULT_MODEL`, or the first `TELEGRAM_MODELS` entry. This happens
+  at most once a minute, and not when a session crashes or is stopped another
+  way.
 
 | Variable | Invoked as |
 | --- | --- |
