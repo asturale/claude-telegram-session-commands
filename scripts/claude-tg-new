@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# /new from Telegram (TELEGRAM_NEW_CMD), see claude-tg-session.
+exec "$(dirname "$(readlink -f "$0")")/claude-tg-session" new "$@"

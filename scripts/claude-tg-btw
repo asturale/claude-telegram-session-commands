@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# /btw <task> (TELEGRAM_BTW_CMD): start a separate background session next to
+# the Telegram session. It runs with the Telegram plugin off (only one process
+# can poll the bot) and reports back through tg-send.
+. "$(dirname "$(readlink -f "$0")")/claude-tg-common.sh"
+cd "$CLAUDE_TG_CWD" || exit 1
+LOG="$CLAUDE_TG_STATE/btw.log"
+
+task="$*"
+if [ -z "$task" ]; then
+  tg-send "Usage: /btw <task>"
+  exit 1
+fi
+
+prompt="Side task (/btw) from the user via Telegram. This session has NO Telegram reply tool, so ignore any instruction to answer through it. Send progress and your final answer with the shell command: tg-send \"<text>\" (plain text, short, main point first; start the final message with 'btw task done:'). Don't ask questions back; if you can't continue without approval, say so through tg-send and stop.
+
+Task: $task"
+
+name="btw-$(date +%m%d-%H%M%S)"
+if out=$(claude --bg --name "$name" --model "$CLAUDE_TG_BTW_MODEL" \
+      --permission-mode "$CLAUDE_TG_PERMISSION_MODE" \
+      --settings '{"enabledPlugins":{"telegram@claude-plugins-official":false}}' \
+      "$prompt" 2>&1); then
+  echo "$(date -Is) $name started: $out" >> "$LOG"
+  tg-send "btw task started ($name). I'll report back when it's done."
+else
+  echo "$(date -Is) $name FAILED: $out" >> "$LOG"
+  tg-send "Starting the btw task failed: $(echo "$out" | tail -3)"
+  exit 1
+fi

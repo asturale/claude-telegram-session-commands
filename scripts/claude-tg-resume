@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""/resume (TELEGRAM_RESUME_CMD).
+  claude-tg-resume list          lines "<session-id>\\t<label>": recent conversations
+  claude-tg-resume <session-id>  replace the Telegram session with a fork of it
+
+Lists conversations from the project of CLAUDE_TG_CWD (default: your home
+directory) that start with a real request; side tasks, fresh /clear sessions
+and the current session are left out.
+"""
+import json, os, re, subprocess, sys
+from datetime import datetime
+from pathlib import Path
+
+here = Path(__file__).resolve().parent
+os.environ["PATH"] = f"{here}:{Path.home()}/.local/bin:" + os.environ.get("PATH", "")
+SHOW = 6
+HEAD_BYTES = 400_000
+# Automatic prompts from claude-tg-session and claude-tg-btw.
+SKIP = ("Side task (/btw)", "The user asks via Telegram (/remember)",
+        "Started via /clear from Telegram. Send")
+
+
+def setting(name, default):
+    """From the environment, else from ~/.config/claude-tg.env."""
+    if os.environ.get(name):
+        return os.environ[name]
+    try:
+        for line in (Path.home() / ".config/claude-tg.env").read_text().splitlines():
+            if line.startswith(f"{name}="):
+                return os.path.expandvars(line.split("=", 1)[1].strip().strip('"'))
+    except OSError:
+        pass
+    return default
+
+
+def first_prompt(path):
+    """First real user request, or None (side task, automatic prompt)."""
+    with open(path, "rb") as fh:
+        head = fh.read(HEAD_BYTES).decode(errors="replace").splitlines()
+    for line in head:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if e.get("type") != "user":
+            continue
+        c = (e.get("message") or {}).get("content")
+        if isinstance(c, list):
+            c = " ".join(x.get("text", "") for x in c if x.get("type") == "text")
+        if not isinstance(c, str) or not c.strip() or c.startswith(("<system-reminder>", "<local-command", "<command-", "This session is being continued", "Caveat:")):
+            continue
+        if c.startswith(SKIP):
+            return None
+        m = re.search(r"<channel [^>]*>(.*?)</channel>", c, re.S)
+        return re.sub(r"\s+", " ", m.group(1) if m else c).strip()
+    return None
+
+
+if len(sys.argv) < 2:
+    sys.exit("usage: claude-tg-resume list | <session-id>")
+
+if sys.argv[1] != "list":
+    os.execvp("claude-tg-session", ["claude-tg-session", "resume", sys.argv[1]])
+
+# Claude Code stores transcripts per project, named after the working directory
+# with every non-alphanumeric character replaced by "-".
+cwd = str(Path(setting("CLAUDE_TG_CWD", str(Path.home()))).resolve())
+project = Path.home() / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", cwd)
+cur = json.loads(subprocess.run(["claude-tg-current"], capture_output=True, text=True,
+                                timeout=30).stdout or "{}")
+files = sorted(project.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+shown, seen = 0, set()
+for f in files[:400]:
+    if f.stem == cur.get("sessionId"):
+        continue
+    p = first_prompt(f)
+    # Forks (/model, /mode, …) share the first request: show only the newest.
+    if not p or p in seen:
+        continue
+    seen.add(p)
+    when = datetime.fromtimestamp(f.stat().st_mtime).strftime("%m-%d %H:%M")
+    label = p if len(p) <= 38 else p[:37] + "…"
+    print(f"{f.stem}\t{when} {label}")
+    shown += 1
+    if shown >= SHOW:
+        break

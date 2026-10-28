@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""/usage (TELEGRAM_USAGE_CMD); stdout is the reply.
+
+1. Plan limits from api.anthropic.com/api/oauth/usage (the same source as /usage
+   in the CLI). The token is CLAUDE_CODE_OAUTH_TOKEN (environment or
+   ~/.config/claude-tg.env), else the interactive login in
+   ~/.claude/.credentials.json. The endpoint rate-limits hard, so the answer is
+   cached for 10 minutes and retry-after is respected
+   (~/.local/state/claude-tg/usage.json).
+2. Always: today's local token usage, added up from all session transcripts.
+"""
+import json, os, time, urllib.error, urllib.request
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+
+HOME = Path.home()
+STATE = HOME / ".local/state/claude-tg/usage.json"
+CACHE_S = 600
+
+
+def token():
+    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
+    try:
+        for line in (HOME / ".config/claude-tg.env").read_text().splitlines():
+            if line.startswith("CLAUDE_CODE_OAUTH_TOKEN="):
+                return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    try:
+        creds = json.loads((HOME / ".claude/.credentials.json").read_text())
+        return creds["claudeAiOauth"]["accessToken"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def plan_usage():
+    """(data, note): data is the endpoint's JSON or None."""
+    try:
+        st = json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        st = {}
+    now = time.time()
+    if st.get("data") and now - st.get("fetched", 0) < CACHE_S:
+        return st["data"], None
+    if now < st.get("retry_at", 0):
+        mins = int((st["retry_at"] - now) // 60) + 1
+        return st.get("data"), f"limits unavailable right now (try again in ~{mins} min)"
+    tok = token()
+    if not tok:
+        return None, "no token found"
+    req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage", headers={
+        "Authorization": f"Bearer {tok}", "anthropic-beta": "oauth-2025-04-20"})
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            st = {"data": json.loads(r.read()), "fetched": now}
+            STATE.write_text(json.dumps(st))
+            return st["data"], None
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            st["retry_at"] = now + int(e.headers.get("retry-after") or 600)
+            STATE.write_text(json.dumps(st))
+            mins = int((st["retry_at"] - now) // 60) + 1
+            return st.get("data"), f"limits unavailable right now (try again in ~{mins} min)"
+        return None, f"fetching limits failed (HTTP {e.code})"
+    except (urllib.error.URLError, TimeoutError, ValueError) as e:
+        return None, f"fetching limits failed ({e})"
+
+
+def fmt_plan(data):
+    names = {"five_hour": "5-hour window", "seven_day": "week (all models)",
+             "seven_day_opus": "week (Opus)", "seven_day_sonnet": "week (Sonnet)"}
+    out = []
+    for key, val in data.items():
+        if not isinstance(val, dict) or val.get("utilization") is None:
+            continue
+        line = f"• {names.get(key, key)}: {round(float(val['utilization']))}%"
+        if val.get("resets_at"):
+            try:
+                t = datetime.fromisoformat(val["resets_at"].replace("Z", "+00:00")).astimezone()
+                line += f" (resets {t.strftime('%a %H:%M')})"
+            except ValueError:
+                pass
+        out.append(line)
+    return out
+
+
+def local_today():
+    """Tokens per model today, from transcripts changed today."""
+    today = datetime.now().astimezone().date()
+    start = datetime.combine(today, datetime.min.time()).timestamp()
+    per = defaultdict(lambda: [0, 0])          # model → [input incl. cache, output]
+    seen = set()
+    for f in (HOME / ".claude/projects").glob("*/*.jsonl"):
+        if f.stat().st_mtime < start:
+            continue
+        for line in f.open(errors="replace"):
+            if '"usage"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            msg = e.get("message") or {}
+            u, ts = msg.get("usage"), e.get("timestamp", "")
+            if not u or not ts:
+                continue
+            if datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().date() != today:
+                continue
+            key = (msg.get("id"), e.get("requestId"))   # count split content blocks once
+            if key in seen:
+                continue
+            seen.add(key)
+            m = per[msg.get("model", "?")]
+            m[0] += sum(u.get(k, 0) for k in ("input_tokens", "cache_read_input_tokens",
+                                              "cache_creation_input_tokens"))
+            m[1] += u.get("output_tokens", 0)
+    return per
+
+
+lines = []
+data, note = plan_usage()
+if data:
+    plan = fmt_plan(data)
+    if plan:
+        lines.append("Plan limits:")
+        lines += plan
+if note:
+    lines.append(f"({note})")
+
+per = local_today()
+lines.append("")
+lines.append("Used today on this machine (all sessions):")
+if not per:
+    lines.append("• nothing yet")
+for model, (inp, out) in sorted(per.items(), key=lambda kv: -sum(kv[1])):
+    if model.startswith("<"):
+        continue
+    lines.append(f"• {model.replace('claude-', '')}: {inp / 1e6:.1f}M in, {out / 1e3:.0f}k out")
+print("\n".join(lines).strip())

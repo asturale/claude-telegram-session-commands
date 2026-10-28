@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# /close from Telegram (TELEGRAM_CLOSE_CMD), see claude-tg-session.
+exec "$(dirname "$(readlink -f "$0")")/claude-tg-session" close "$@"

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# /compact [instructions] (TELEGRAM_COMPACT_CMD): type /compact into the
+# Telegram session through claude-tg-type, because background sessions have no
+# other input. If the session is busy, /compact is queued after the turn.
+. "$(dirname "$(readlink -f "$0")")/claude-tg-common.sh"
+exec >>"$CLAUDE_TG_STATE/session.log" 2>&1
+echo "=== $(date -Is) compact $*"
+
+id=$(claude-tg-current | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+if [ -z "$id" ]; then
+  tg-send "Compacting failed: no Telegram background session found."
+  exit 1
+fi
+claude-tg-type "$id" "/compact $*" && echo "typed /compact into $id"

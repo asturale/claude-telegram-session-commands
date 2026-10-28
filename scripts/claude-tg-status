@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""/status (TELEGRAM_STATUS_CMD): the Telegram session and any side tasks.
+stdout is appended to the plugin's own /status answer.
+"""
+import json, os, subprocess
+from pathlib import Path
+
+here = Path(__file__).resolve().parent
+os.environ["PATH"] = f"{here}:{Path.home()}/.local/bin:" + os.environ.get("PATH", "")
+PROJECTS = Path.home() / ".claude/projects"
+
+
+def context_tokens(session_id):
+    """Context size = input tokens (cache included) of the latest API response."""
+    files = list(PROJECTS.glob(f"*/{session_id}.jsonl"))
+    if not files:
+        return None
+    last = None
+    for line in files[0].read_text(errors="replace").splitlines():
+        if '"usage"' not in line:
+            continue
+        try:
+            u = json.loads(line).get("message", {}).get("usage")
+        except ValueError:
+            continue
+        if u:
+            last = u
+    if not last:
+        return None
+    return sum(last.get(k, 0) for k in
+               ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+
+
+agents = json.loads(subprocess.run(["claude", "agents", "--json"], capture_output=True,
+                                   text=True, timeout=20).stdout or "[]")
+cur = json.loads(subprocess.run(["claude-tg-current"], capture_output=True, text=True,
+                                timeout=30).stdout or "{}")
+lines = []
+if cur.get("pid"):
+    state = {"busy": "working", "idle": "waiting"}.get(cur.get("status"), cur.get("status") or "?")
+    lines.append(f"Telegram session: {cur.get('id') or cur['pid']} ({state})")
+    lines.append(f"• model: {cur.get('model') or '?'}")
+    lines.append(f"• mode: {cur.get('perm') or '?'}")
+    tok = context_tokens(cur.get("sessionId", ""))
+    if tok is not None:
+        lines.append(f"• context: ~{tok // 1000}k tokens")
+else:
+    lines.append("No Telegram session found.")
+
+side = [a for a in agents if str(a.get("name", "")).startswith(("btw-", "remember-"))]
+if side:
+    lines.append("")
+    lines.append("Side tasks:")
+    for a in side:
+        state = {"busy": "working", "idle": "done/waiting"}.get(a.get("status"), a.get("status", "?"))
+        lines.append(f"• {a['name']} ({a.get('id', '?')}): {state}")
+print("\n".join(lines))

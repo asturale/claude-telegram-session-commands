@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""/progress (TELEGRAM_PROGRESS_CMD): what is the Telegram session doing now?
+The plugin runs this every few seconds while you watch. stdout is the message;
+exit 0 = busy, 3 = done or waiting (the plugin then stops updating).
+
+Reads the end of the session transcript (~/.claude/projects/*/<sessionId>.jsonl):
+the last request, the steps (tool calls) after it and the latest text.
+"""
+import json, os, re, subprocess, sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+here = Path(__file__).resolve().parent
+os.environ["PATH"] = f"{here}:{Path.home()}/.local/bin:" + os.environ.get("PATH", "")
+PROJECTS = Path.home() / ".claude/projects"
+TAIL_BYTES = 1_500_000
+STEPS = 6
+TELEGRAM_TOOLS = "mcp__plugin_telegram_telegram__"
+
+
+def short(s, n):
+    s = re.sub(r"\s+", " ", str(s)).strip()
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def prompt_text(content):
+    """Text of a real user request, or None (tool results and the like)."""
+    if isinstance(content, list):
+        texts = [c.get("text", "") for c in content if c.get("type") == "text"]
+        if not texts:
+            return None
+        content = " ".join(texts)
+    if not isinstance(content, str) or content.startswith("<system-reminder>"):
+        return None
+    m = re.search(r"<channel [^>]*>(.*?)</channel>", content, re.S)
+    return m.group(1) if m else content
+
+
+def step_label(name, inp):
+    for key in ("description", "command", "file_path", "pattern", "query", "url",
+                "prompt", "text", "skill"):
+        if inp.get(key):
+            val = inp[key]
+            if key == "file_path":
+                val = Path(val).name
+            return f"{name}: {short(val, 60)}"
+    return name.replace("mcp__", "").split("__")[-1]
+
+
+cur = json.loads(subprocess.run(["claude-tg-current"], capture_output=True, text=True,
+                                timeout=30).stdout or "{}")
+files = list(PROJECTS.glob(f"*/{cur.get('sessionId', '-')}.jsonl")) if cur.get("sessionId") else []
+if not files:
+    print("No Telegram session or transcript found.")
+    sys.exit(3)
+
+with open(files[0], "rb") as fh:
+    fh.seek(max(0, files[0].stat().st_size - TAIL_BYTES))
+    lines = fh.read().decode(errors="replace").splitlines()[1:]
+
+prompt, prompt_ts, steps, last_text = None, None, [], None
+for line in lines:
+    try:
+        e = json.loads(line)
+    except ValueError:
+        continue
+    msg = e.get("message") or {}
+    if e.get("type") == "user":
+        t = prompt_text(msg.get("content"))
+        if t:
+            prompt, prompt_ts, steps, last_text = t, e.get("timestamp"), [], None
+    elif e.get("type") == "assistant":
+        for c in msg.get("content") or []:
+            if c.get("type") == "tool_use":
+                # Telegram messages themselves (reply, react, …) are not progress.
+                if c.get("name", "").startswith(TELEGRAM_TOOLS):
+                    continue
+                steps.append(step_label(c.get("name", "?"), c.get("input") or {}))
+            elif c.get("type") == "text" and c.get("text", "").strip():
+                last_text = c["text"]
+
+busy = cur.get("status") == "busy"
+out = ["Working" if busy else "Done / waiting for you"]
+if prompt:
+    since = ""
+    if prompt_ts:
+        secs = int((datetime.now(timezone.utc) - datetime.fromisoformat(
+            prompt_ts.replace("Z", "+00:00"))).total_seconds())
+        since = f" ({secs // 60}m{secs % 60:02d}s ago)"
+    out.append(f"Request{since}: {short(prompt, 160)}")
+if steps:
+    out.append("")
+    out.append(f"Steps ({len(steps)} in total, last {min(STEPS, len(steps))}):")
+    out += [f"• {s}" for s in steps[-STEPS:]]
+if last_text:
+    out.append("")
+    out.append(f"Latest text: {short(last_text, 300)}")
+print("\n".join(out))
+sys.exit(0 if busy else 3)

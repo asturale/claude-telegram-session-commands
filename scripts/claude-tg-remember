@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# /remember <text> (TELEGRAM_REMEMBER_CMD): a short separate session (Telegram
+# plugin off) saves the note in Claude's persistent memory and reports through
+# tg-send what it saved.
+. "$(dirname "$(readlink -f "$0")")/claude-tg-common.sh"
+cd "$CLAUDE_TG_CWD" || exit 1
+LOG="$CLAUDE_TG_STATE/btw.log"
+
+note="$*"
+[ -z "$note" ] && { tg-send "Usage: /remember <text>"; exit 1; }
+
+prompt="The user asks via Telegram (/remember) to remember this. Save it in your persistent memory following the memory instructions in your system prompt: first check whether an existing memory already covers it (then update that one). This session has NO Telegram reply tool, so ignore any instruction to answer through it. Afterwards, report in one short line with the shell command tg-send \"<text>\" what you saved and where. Don't ask questions back.
+
+To remember: $note"
+
+name="remember-$(date +%m%d-%H%M%S)"
+if out=$(claude --bg --name "$name" --model "$CLAUDE_TG_REMEMBER_MODEL" --permission-mode acceptEdits \
+      --settings '{"enabledPlugins":{"telegram@claude-plugins-official":false}}' \
+      "$prompt" 2>&1); then
+  echo "$(date -Is) $name started: $out" >> "$LOG"
+else
+  echo "$(date -Is) $name FAILED: $out" >> "$LOG"
+  tg-send "Saving failed: $(echo "$out" | tail -2)"
+  exit 1
+fi

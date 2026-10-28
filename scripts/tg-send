@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Send a text message to you through the Telegram bot (Bot API sendMessage).
+
+Usage: tg-send "text"   or   echo text | tg-send
+Works next to a running Telegram session: sendMessage does not clash with the
+plugin's getUpdates poller. The token comes from the plugin's .env, the chat id
+is the first allowFrom entry in access.json.
+"""
+import json, os, sys, urllib.parse, urllib.request
+from pathlib import Path
+
+STATE = Path(os.environ.get("TELEGRAM_STATE_DIR") or Path.home() / ".claude/channels/telegram")
+token = os.environ.get("TELEGRAM_BOT_TOKEN") or next(
+    l.split("=", 1)[1].strip() for l in (STATE / ".env").read_text().splitlines()
+    if l.startswith("TELEGRAM_BOT_TOKEN="))
+chat_id = json.loads((STATE / "access.json").read_text())["allowFrom"][0]
+
+text = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else sys.stdin.read()
+text = text.strip() or "(empty message)"
+# With the relay: the same "[2·sonnet] " label as the plugin's own messages.
+try:
+    relay = json.loads((STATE / "relay-state.json").read_text())
+    me = int(os.environ.get("TELEGRAM_SESSION_PID", "0"))
+    tag = next((s["label"] for s in relay["sessions"] if s["pid"] == me), "")
+    if relay.get("multi") and tag:
+        text = f"[{tag}] {text}"
+except (OSError, ValueError, KeyError, TypeError):
+    pass
+for i in range(0, len(text), 4000):
+    data = urllib.parse.urlencode({"chat_id": chat_id, "text": text[i:i + 4000]}).encode()
+    urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data, timeout=20).read()

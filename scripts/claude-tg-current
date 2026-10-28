@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""Which Claude session is connected to the Telegram bot? Prints JSON:
+{"pid", "id", "sessionId", "model", "perm", "effort", "status"} ("" = unknown).
+
+Finds the session through the poller: bot.pid (the plugin's server) and then
+its parent processes, up to a pid listed by `claude agents`. The command line
+is no use for that: background sessions claimed from a pre-started spare
+process show `claude bg-spare …` there. Model and permission mode come from
+the state files claude-tg-session writes, or else from the command line
+(a foreground session from claude-tg-loop.sh).
+
+With the relay (TELEGRAM_RELAY=1) the plugin sets TELEGRAM_SESSION_PID to the
+server of the session a command is about; it wins over bot.pid (the active
+session).
+"""
+import json, os, re, subprocess
+from pathlib import Path
+
+HOME = Path.home()
+os.environ["PATH"] = f"{HOME}/.local/bin:" + os.environ.get("PATH", "")
+TG_DIR = Path(os.environ.get("TELEGRAM_STATE_DIR") or HOME / ".claude/channels/telegram")
+BOT_PID = TG_DIR / "bot.pid"
+STATE = HOME / ".local/state/claude-tg/current.json"
+SESSIONS = HOME / ".local/state/claude-tg/sessions"  # <bg-id>.json per session
+
+
+def ppid(pid):
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        return int(stat.rsplit(")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def cmdline(pid):
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+    except OSError:
+        return ""
+
+
+agents = json.loads(subprocess.run(["claude", "agents", "--json"], capture_output=True,
+                                   text=True, timeout=20).stdout or "[]")
+by_pid = {a.get("pid"): a for a in agents}
+out = {"pid": "", "id": "", "sessionId": "", "model": "", "perm": "", "effort": "", "status": ""}
+
+try:
+    pid = int(os.environ.get("TELEGRAM_SESSION_PID") or BOT_PID.read_text().strip())
+except (OSError, ValueError):
+    pid = 0
+chain = []
+while pid > 1 and len(chain) < 15:
+    chain.append(pid)
+    if pid in by_pid:
+        break
+    pid = ppid(pid)
+
+agent = next((by_pid[p] for p in chain if p in by_pid), None)
+if not agent and not chain:
+    # No poller (bot.pid gone): fall back to the session claude-tg-session
+    # started last.
+    try:
+        st_id = json.loads(STATE.read_text()).get("id", "")
+    except (OSError, ValueError):
+        st_id = ""
+    agent = next((a for a in agents if st_id and a.get("id") == st_id), None)
+if agent:
+    out.update(pid=agent["pid"], id=agent.get("id", ""), sessionId=agent.get("sessionId", ""),
+               status=agent.get("status", ""))
+else:
+    # No background session: the nearest claude process with --channels.
+    for p in chain:
+        if "--channels" in cmdline(p):
+            out["pid"] = p
+            m = re.search(r"--session-id (\S+)", cmdline(p))
+            out["sessionId"] = m.group(1) if m else ""
+            break
+
+args = cmdline(out["pid"]) if out["pid"] else ""
+for key, flag in (("model", "--model"), ("perm", "--permission-mode")):
+    m = re.search(rf"{flag} (\S+)", args)
+    if m:
+        out[key] = m.group(1)
+for f in (SESSIONS / f"{out['id']}.json", STATE):
+    try:
+        st = json.loads(f.read_text())
+    except (OSError, ValueError):
+        continue
+    if out["id"] and st.get("id") == out["id"]:
+        out["model"] = out["model"] or st.get("model", "")
+        out["perm"] = out["perm"] or st.get("perm", "")
+        out["effort"] = st.get("effort", "")
+        break
+print(json.dumps(out))

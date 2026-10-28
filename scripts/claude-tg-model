@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# /model from Telegram (TELEGRAM_MODEL_CMD), see claude-tg-session.
+exec "$(dirname "$(readlink -f "$0")")/claude-tg-session" model "$@"

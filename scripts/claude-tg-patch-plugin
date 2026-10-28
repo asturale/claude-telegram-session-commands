@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Apply this repository's server.ts changes and relay.ts to the installed
+# Telegram plugin. The patch is the diff between the branches upstream (the
+# official plugin) and main, fetched from origin. Idempotent: server.ts is
+# rebuilt from the original (server.ts.orig) every time and only written when
+# the result differs. A plugin update installs a new version directory without
+# the patch; the next run patches that one.
+# The session loads server.ts at startup, so changes apply after a restart.
+. "$(dirname "$(readlink -f "$0")")/claude-tg-common.sh"
+set -u
+REPO="${CLAUDE_TG_REPO:-$(dirname "$CLAUDE_TG_BIN")}"
+CACHE="$HOME/.claude/plugins/cache/claude-plugins-official/telegram"
+dir=$(ls -d "$CACHE"/*/ 2>/dev/null | sort -V | tail -1)
+[ -z "$dir" ] && { echo "no telegram plugin in $CACHE"; exit 1; }
+dir=${dir%/}
+f="$dir/server.ts"
+# Keep the original, but only while server.ts is still unpatched.
+if [ ! -f "$f.orig" ]; then
+  if grep -q "TELEGRAM_CLEAR_CMD" "$f"; then
+    echo "server.ts is patched but $f.orig is missing; restore it by hand"; exit 1
+  fi
+  cp "$f" "$f.orig"
+fi
+git -C "$REPO" fetch -q origin 2>/dev/null || echo "fetch failed, using the local branches"
+diff=$(git -C "$REPO" diff origin/upstream origin/main -- server.ts)
+work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+cp "$f.orig" "$work/server.ts"
+if ! patch -s -p1 -d "$work" <<<"$diff" >/dev/null; then
+  echo "patch does not apply to $f (plugin changed a lot?); update by hand"
+  tg-send "The Telegram plugin patch no longer applies to the new plugin version in $dir. The session commands work again once it is updated." 2>/dev/null
+  exit 1
+fi
+# relay.ts is a separate file, not part of the diff. Copy it first, because the
+# patched server.ts imports it.
+if git -C "$REPO" show origin/main:relay.ts > "$work/relay.ts" 2>/dev/null; then
+  cmp -s "$work/relay.ts" "$dir/relay.ts" || { cp "$work/relay.ts" "$dir/relay.ts" && echo "relay.ts updated: $dir"; }
+fi
+if cmp -s "$work/server.ts" "$f"; then
+  echo "up to date: $f"
+else
+  cp "$work/server.ts" "$f" && echo "patched: $f"
+fi

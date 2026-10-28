@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""/tasks (TELEGRAM_TASKS_CMD): the side sessions started by /btw and /remember.
+  claude-tg-tasks list         lines "<id>\\t<label>"
+  claude-tg-tasks result <id>  latest text of that session (stdout is the reply)
+  claude-tg-tasks stop <id>    stop that session
+"""
+import json, os, re, subprocess, sys
+from pathlib import Path
+
+os.environ["PATH"] = f"{Path.home()}/.local/bin:" + os.environ.get("PATH", "")
+PROJECTS = Path.home() / ".claude/projects"
+
+
+def side_agents():
+    agents = json.loads(subprocess.run(["claude", "agents", "--json"], capture_output=True,
+                                       text=True, timeout=20).stdout or "[]")
+    return {a["id"]: a for a in agents
+            if str(a.get("name", "")).startswith(("btw-", "remember-")) and a.get("id")}
+
+
+def last_text(session_id):
+    files = list(PROJECTS.glob(f"*/{session_id}.jsonl"))
+    if not files:
+        return None
+    last = None
+    for line in files[0].read_text(errors="replace").splitlines():
+        if '"assistant"' not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        for c in (e.get("message") or {}).get("content") or []:
+            if c.get("type") == "text" and c.get("text", "").strip():
+                last = c["text"].strip()
+    return last
+
+
+action = sys.argv[1] if len(sys.argv) > 1 else "list"
+tasks = side_agents()
+
+if action == "list":
+    for tid, a in tasks.items():
+        state = {"busy": "working", "idle": "done"}.get(a.get("status"), a.get("status", "?"))
+        print(f"{tid}\t{a['name']} ({state})")
+    sys.exit(0)
+
+tid = sys.argv[2] if len(sys.argv) > 2 else ""
+if not re.fullmatch(r"[0-9a-f]{8}", tid) or tid not in tasks:
+    print("That task doesn't exist (any more).")
+    sys.exit(0)
+if action == "stop":
+    subprocess.run(["claude", "stop", tid], capture_output=True, timeout=30)
+    print(f"Task {tasks[tid]['name']} stopped.")
+elif action == "result":
+    text = last_text(tasks[tid].get("sessionId", ""))
+    print(text[:3800] if text else "No text from this task yet.")
+else:
+    print(f"Unknown action: {action}")

@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Type a line into a Claude background session, as if you opened it with
+`claude attach` and typed it yourself.
+  claude-tg-type <id> <text>     type the text and press Enter
+  claude-tg-type --key esc <id>  only send Esc (interrupt the turn)
+
+There is no CLI command to send input to a --bg session. This runs
+`claude attach` in a pseudo-terminal, waits for the UI, types the text and
+Enter, and closes the attach client again. The session keeps running.
+"""
+import os, pty, select, signal, sys, time
+from pathlib import Path
+
+args = sys.argv[1:]
+key = None
+if args[:1] == ["--key"]:
+    key, args = {"esc": b"\x1b", "ctrl-c": b"\x03"}[args[1]], args[2:]
+sid, text = args[0], " ".join(args[1:])
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ["TERM"] = "xterm-256color"
+    os.execvp("claude", ["claude", "attach", sid])
+
+
+def drain(seconds):
+    end, buf = time.time() + seconds, b""
+    while time.time() < end:
+        r, _, _ = select.select([fd], [], [], 0.2)
+        if r:
+            try:
+                buf += os.read(fd, 65536)
+            except OSError:
+                break
+    return buf
+
+
+screen = drain(6)            # let the UI build up
+if key:
+    os.write(fd, key)
+    screen += drain(3)
+else:
+    os.write(fd, text.encode())
+    drain(1)
+    os.write(fd, b"\r")
+    drain(3)                 # let the input arrive
+if os.environ.get("CLAUDE_TG_TYPE_DUMP"):
+    Path(os.environ["CLAUDE_TG_TYPE_DUMP"]).write_bytes(screen)
+os.kill(pid, signal.SIGTERM)
+drain(1)
+try:
+    os.kill(pid, signal.SIGKILL)
+except ProcessLookupError:
+    pass
+os.waitpid(pid, 0)

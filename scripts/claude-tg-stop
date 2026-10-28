@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# /stop (TELEGRAM_STOP_CMD): interrupt the Telegram session's current turn by
+# sending Esc through claude-tg-type.
+. "$(dirname "$(readlink -f "$0")")/claude-tg-common.sh"
+exec >>"$CLAUDE_TG_STATE/session.log" 2>&1
+echo "=== $(date -Is) stop"
+
+id=$(claude-tg-current | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+if [ -z "$id" ]; then
+  tg-send "Interrupting failed: no Telegram background session found."
+  exit 1
+fi
+claude-tg-type --key esc "$id" && echo "sent esc to $id"
