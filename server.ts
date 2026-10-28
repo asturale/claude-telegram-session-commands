@@ -771,6 +771,8 @@ bot.command('status', async ctx => {
 //   TELEGRAM_RESUME_CMD  /resume: `<cmd> <value>` (detached) on tap
 //   TELEGRAM_TASKS_CMD   /tasks: `<cmd> result <value>` or `<cmd> stop <value>`,
 //                        stdout is the reply
+//   TELEGRAM_SKILL_CMD   /skill: `<cmd> <value>` (detached) on tap;
+//                        `/skill <name> [text]` runs `<cmd> <name> [text]` directly
 // Live:
 //   TELEGRAM_PROGRESS_CMD `<cmd>` every TELEGRAM_PROGRESS_INTERVAL seconds
 //   (default 5) while /progress is followed; stdout is the message text,
@@ -981,12 +983,14 @@ for (const [kind, sw] of Object.entries(switchers)) {
 // to a safe charset that fits Telegram's 64-byte callback data. A line with
 // value `page-<n>` is a paging button instead: tapping it runs `<cmd> list <n>`
 // and replaces the buttons in place. Paging buttons share the last row.
-const PICK_VALUE = /^[A-Za-z0-9_.-]{1,40}$/
+const PICK_VALUE = /^[A-Za-z0-9_.:-]{1,40}$/
 const pickers = {
   resume: { env: 'TELEGRAM_RESUME_CMD', description: 'Go back to an earlier conversation',
     prompt: 'Resume which conversation?', empty: 'No earlier conversations found.' },
   tasks: { env: 'TELEGRAM_TASKS_CMD', description: 'Side tasks: result or stop',
     prompt: 'Side tasks (tap for the result):', empty: 'No side tasks running.' },
+  skill: { env: 'TELEGRAM_SKILL_CMD', description: 'Run a skill in the session',
+    prompt: 'Run which skill?', empty: 'No skills found.' },
 }
 
 // Button rows for one page of `<cmd> list [offset]`, or null if it printed none.
@@ -1016,6 +1020,17 @@ for (const [name, pk] of Object.entries(pickers)) {
       await ctx.reply(`/${name} is not configured (${pk.env}).`)
       return
     }
+    const arg = String(ctx.match ?? '').trim()
+    if (name === 'skill' && arg) {
+      const [skill, ...rest] = arg.split(/\s+/)
+      if (!PICK_VALUE.test(skill.replace(/^\//, ''))) {
+        await ctx.reply('Usage: /skill [name] [text]')
+        return
+      }
+      await ctx.reply(`Running /${skill.replace(/^\//, '')}…`)
+      runDetached(cmd, [skill, ...(rest.length ? [rest.join(' ')] : [])])
+      return
+    }
     const { text, ok } = await runOutput(cmd, ['list'])
     if (!ok) {
       await ctx.reply(text)
@@ -1030,7 +1045,7 @@ for (const [name, pk] of Object.entries(pickers)) {
   })
 }
 
-bot.callbackQuery(/^pick:(resume|tasks):(go|result|stop|page):([A-Za-z0-9_.-]{1,40})$/, async ctx => {
+bot.callbackQuery(/^pick:(resume|tasks|skill):(go|result|stop|page):([A-Za-z0-9_.:-]{1,40})$/, async ctx => {
   if (!(await ownerCallback(ctx))) return
   const [, name, action, value] = ctx.match
   const cmd = process.env[pickers[name as keyof typeof pickers].env]
@@ -1049,6 +1064,12 @@ bot.callbackQuery(/^pick:(resume|tasks):(go|result|stop|page):([A-Za-z0-9_.-]{1,
   if (name === 'resume') {
     await ctx.answerCallbackQuery({ text: 'Resuming…' }).catch(() => {})
     await ctx.editMessageText('Resuming that conversation…').catch(() => {})
+    runDetached(cmd, [value])
+    return
+  }
+  if (name === 'skill') {
+    await ctx.answerCallbackQuery({ text: `Running /${value}…` }).catch(() => {})
+    await ctx.editMessageText(`Running /${value}…`).catch(() => {})
     runDetached(cmd, [value])
     return
   }

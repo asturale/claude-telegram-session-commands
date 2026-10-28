@@ -25,6 +25,8 @@ The upstream documentation is in [README.md](../README.md) and [ACCESS.md](../AC
 | `/compact [instructions]` | Compact the conversation | `TELEGRAM_COMPACT_CMD` |
 | `/btw <task>` | Run a side task in a separate session that reports back | `TELEGRAM_BTW_CMD` |
 | `/tasks` | List side tasks; tap for the latest result, or stop one | `TELEGRAM_TASKS_CMD` |
+| `/skill` | Buttons with your skills; tap one, or send `/skill <name> [text]`, to run it in the session | `TELEGRAM_SKILL_CMD` |
+| `TELEGRAM_SKILL_CMD` | `<cmd> list` as above; `<cmd> <name>` on tap, `/skill <name> [text]` runs `<cmd> <name> [text]` |
 | `/remember <text>` | Save a note to Claude's memory | `TELEGRAM_REMEMBER_CMD` |
 | `/usage` | Plan limits and token usage | `TELEGRAM_USAGE_CMD` |
 | `/status` | Pairing status, plus the output of your status script | `TELEGRAM_STATUS_CMD` |

@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""/skill (TELEGRAM_SKILL_CMD): run a skill in the Telegram session.
+  claude-tg-skill list [n]       lines "<name>\\t<label>": skills you can invoke,
+                                 from the n-th on, plus "page-<n>" lines to page through
+  claude-tg-skill <name> [text]  type "/<name> [text]" into the session
+
+Skills come from ~/.claude/skills, the working directory's .claude/skills and
+the enabled plugins (as plugin:skill), minus those marked
+`user-invocable: false` and the Telegram plugin's own. Skills built into Claude
+Code have no file; list the ones you want in CLAUDE_TG_SKILLS_EXTRA
+(comma-separated). Like /compact, the text is typed into the session through
+claude-tg-type, so it is a real slash command; if the session is busy, it
+runs after the current turn.
+"""
+import json, os, re, subprocess, sys
+from datetime import datetime
+from pathlib import Path
+
+HOME = Path.home()
+here = Path(__file__).resolve().parent
+os.environ["PATH"] = f"{here}:{HOME}/.local/bin:" + os.environ.get("PATH", "")
+LOG = HOME / ".local/state/claude-tg/session.log"
+SHOW = 8
+NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,40}$")
+
+
+def setting(name, default):
+    """From the environment, else from ~/.config/claude-tg.env."""
+    if name in os.environ:
+        return os.environ[name]
+    try:
+        for line in (HOME / ".config/claude-tg.env").read_text().splitlines():
+            if line.startswith(f"{name}="):
+                return os.path.expandvars(line.split("=", 1)[1].strip().strip("\"'"))
+    except OSError:
+        pass
+    return default
+
+
+def load(path, default):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def frontmatter(path):
+    """The `key: value` lines between the leading --- markers."""
+    out = {}
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return out
+    if not lines or lines[0].strip() != "---":
+        return out
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        k, sep, v = line.partition(":")
+        if sep and not line.startswith((" ", "\t")):
+            out[k.strip()] = v.strip().strip("\"'")
+    return out
+
+
+def skills():
+    """{name: description}, sorted by name."""
+    found = {}
+
+    def scan(root, prefix=""):
+        for f in sorted(Path(root).glob("*/SKILL.md")):
+            meta = frontmatter(f)
+            if meta.get("user-invocable", "").lower() == "false":
+                continue
+            name = prefix + (meta.get("name") or f.parent.name)
+            if NAME.match(name):
+                found.setdefault(name, meta.get("description", ""))
+
+    scan(Path(setting("CLAUDE_TG_CWD", str(HOME))) / ".claude/skills")
+    scan(HOME / ".claude/skills")
+    enabled = load(HOME / ".claude/settings.json", {}).get("enabledPlugins", {})
+    installed = load(HOME / ".claude/plugins/installed_plugins.json", {}).get("plugins", {})
+    for key, versions in installed.items():
+        if not enabled.get(key) or key.startswith("telegram@") or not versions:
+            continue
+        scan(Path(versions[-1]["installPath"]) / "skills", key.split("@")[0] + ":")
+    for name in setting("CLAUDE_TG_SKILLS_EXTRA", "").split(","):
+        if NAME.match(name.strip()):
+            found.setdefault(name.strip(), "")
+    return dict(sorted(found.items()))
+
+
+def log(text):
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOG, "a") as fh:
+        fh.write(f"=== {datetime.now().isoformat(timespec='seconds')} skill {text}\n")
+
+
+if len(sys.argv) < 2:
+    sys.exit("usage: claude-tg-skill list [n] | <name> [text]")
+
+if sys.argv[1] == "list":
+    try:
+        offset = max(int(sys.argv[2]), 0) if len(sys.argv) > 2 else 0
+    except ValueError:
+        offset = 0
+    names = list(skills())
+    for name in names[offset:offset + SHOW]:
+        print(f"{name}\t/{name}")
+    if offset:
+        print(f"page-{max(offset - SHOW, 0)}\t◂ Previous")
+    if len(names) > offset + SHOW:
+        print(f"page-{offset + SHOW}\tMore ▸")
+    sys.exit(0)
+
+# One line: a newline would press Enter halfway through.
+name, text = sys.argv[1].lstrip("/"), re.sub(r"\s+", " ", " ".join(sys.argv[2:])).strip()
+if name not in skills():
+    subprocess.run(["tg-send", f"Unknown skill: {name}. Send /skill for the list."])
+    sys.exit(1)
+cur = json.loads(subprocess.run(["claude-tg-current"], capture_output=True, text=True,
+                                timeout=30).stdout or "{}")
+if not cur.get("id"):
+    subprocess.run(["tg-send", "Running the skill failed: no Telegram background session found."])
+    sys.exit(1)
+line = f"/{name} {text}".strip()
+log(f"{cur['id']}: {line}")
+r = subprocess.run(["claude-tg-type", cur["id"], line], capture_output=True, text=True)
+log(f"claude-tg-type exit {r.returncode} {r.stdout.strip()} {r.stderr.strip()}")
+if r.returncode:
+    subprocess.run(["tg-send", f"Running /{name} failed: {(r.stderr or r.stdout).strip()[-200:]}"])
+sys.exit(r.returncode)
