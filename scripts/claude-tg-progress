@@ -3,6 +3,11 @@
 The plugin runs this every few seconds while you watch. stdout is the message;
 exit 0 = busy, 3 = done or waiting (the plugin then stops updating).
 
+Busy is what `claude agents` says, or an unfinished turn in the transcript: a
+request with no turn end ("turn_duration") after it. Such a turn can also be a
+hung request, which `claude agents` reports as idle; the age of the last
+transcript entry then shows how long nothing has happened.
+
 Reads the end of the session transcript (~/.claude/projects/*/<sessionId>.jsonl):
 the last request, the steps (tool calls) after it and the latest text.
 """
@@ -59,16 +64,24 @@ with open(files[0], "rb") as fh:
     lines = fh.read().decode(errors="replace").splitlines()[1:]
 
 prompt, prompt_ts, steps, last_text = None, None, [], None
+open_turn, queued, last_ts = False, 0, None
 for line in lines:
     try:
         e = json.loads(line)
     except ValueError:
         continue
     msg = e.get("message") or {}
+    if e.get("type") in ("user", "assistant") and e.get("timestamp"):
+        last_ts = e["timestamp"]
+    if e.get("type") == "queue-operation":
+        queued = queued + 1 if e.get("operation") == "enqueue" else max(queued - 1, 0)
+    elif e.get("type") == "system" and e.get("subtype") == "turn_duration":
+        open_turn = False
     if e.get("type") == "user":
         t = prompt_text(msg.get("content"))
         if t:
             prompt, prompt_ts, steps, last_text = t, e.get("timestamp"), [], None
+            open_turn = True
     elif e.get("type") == "assistant":
         for c in msg.get("content") or []:
             if c.get("type") == "tool_use":
@@ -79,14 +92,25 @@ for line in lines:
             elif c.get("type") == "text" and c.get("text", "").strip():
                 last_text = c["text"]
 
-busy = cur.get("status") == "busy"
-out = ["Working" if busy else "Done / waiting for you"]
+def ago(ts):
+    secs = int((datetime.now(timezone.utc) - datetime.fromisoformat(
+        ts.replace("Z", "+00:00"))).total_seconds())
+    return f"{secs // 60}m{secs % 60:02d}s", secs
+
+
+agent_busy = cur.get("status") == "busy"
+busy = agent_busy or open_turn
+if agent_busy or not open_turn:
+    out = ["Working" if busy else "Done / waiting for you"]
+else:
+    # The transcript has an unfinished turn, but the session says it is idle.
+    quiet, secs = ago(last_ts) if last_ts else ("?", 0)
+    out = [f"Waiting for Claude: no activity for {quiet}"
+           + (". The session may be stuck; /stop interrupts it." if secs >= 120 else "")]
+if queued:
+    out.append(f"{queued} message{'s' if queued > 1 else ''} queued")
 if prompt:
-    since = ""
-    if prompt_ts:
-        secs = int((datetime.now(timezone.utc) - datetime.fromisoformat(
-            prompt_ts.replace("Z", "+00:00"))).total_seconds())
-        since = f" ({secs // 60}m{secs % 60:02d}s ago)"
+    since = f" ({ago(prompt_ts)[0]} ago)" if prompt_ts else ""
     out.append(f"Request{since}: {short(prompt, 160)}")
 if steps:
     out.append("")
