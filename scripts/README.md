@@ -84,7 +84,7 @@ For a machine nobody logs in to, use a long-lived token: run
 | `claude-tg-progress` | `/progress` | Request, steps and latest text from the session transcript |
 | `claude-tg-status` | `/status` | Model, mode, context size and side tasks |
 | `claude-tg-usage` | `/usage` | Plan limits (cached) and today's token use |
-| `claude-tg-resume` | `/resume` | Recent conversations as buttons; a tap forks one |
+| `claude-tg-resume` | `/resume` | Open sessions and recent conversations as buttons, labelled with a short topic summary; a tap switches to or forks one |
 | `claude-tg-patch-plugin` | every start | Applies `server.ts` and `relay.ts` from this repository to the installed plugin |
 | `tg-send` | side sessions, errors | Sends a message to you through the Bot API |
 | `claude-tg-common.sh` | the bash scripts | Settings, `PATH` and the token |

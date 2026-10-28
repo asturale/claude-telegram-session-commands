@@ -1,97 +1,271 @@
 #!/usr/bin/env python3
 """/resume (TELEGRAM_RESUME_CMD).
-  claude-tg-resume list [n]      lines "<session-id>\\t<label>": recent conversations
+  claude-tg-resume list [n]      lines "<value>\\t<label>": recent conversations
                                  from the n-th on, plus "page-<n>" lines to page through
   claude-tg-resume <session-id>  replace the Telegram session with a fork of it
+  claude-tg-resume use-<pid>     switch to an open relay session
 
-Lists conversations from the project of CLAUDE_TG_CWD (default: your home
-directory) that start with a real request; side tasks, fresh /clear sessions
-and the current session are left out.
+With the relay, the other open sessions come first (● label). Then the
+conversations from the project of CLAUDE_TG_CWD (default: your home directory)
+that contain a real request; side tasks and open sessions are left out. A name
+set with /name wins; otherwise the label is a one-line summary of the topic
+(CLAUDE_TG_TITLE_MODEL, run headless and cached), or the first request until
+that summary exists. Set CLAUDE_TG_TITLE_MODEL to an empty value to turn the
+summaries off.
 """
-import json, os, re, subprocess, sys
+import json, os, re, socket, subprocess, sys
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
 
+HOME = Path.home()
 here = Path(__file__).resolve().parent
-os.environ["PATH"] = f"{here}:{Path.home()}/.local/bin:" + os.environ.get("PATH", "")
+os.environ["PATH"] = f"{here}:{HOME}/.local/bin:" + os.environ.get("PATH", "")
+ENV_FILE = HOME / ".config/claude-tg.env"
+TG = Path(os.environ.get("TELEGRAM_STATE_DIR") or HOME / ".claude/channels/telegram")
+TITLES = HOME / ".local/state/claude-tg/resume-titles.json"
 SHOW = 6
 HEAD_BYTES = 400_000
-# Automatic prompts from claude-tg-session and claude-tg-btw.
-SKIP = ("Side task (/btw)", "The user asks via Telegram (/remember)",
-        "Started via /clear from Telegram. Send")
+TITLE_WAIT = 20          # seconds; the plugin waits at most 30 s for `list`
+LABEL_MAX = 44
+NOISE = ("<system-reminder>", "<local-command", "<command-", "This session is being continued", "Caveat:")
+# Automatic prompts from claude-tg-btw and claude-tg-remember: not a conversation.
+SIDE_TASK = ("Side task (/btw)", "The user asks via Telegram (/remember)")
+# Automatic prompts from claude-tg-session: the first real request comes later.
+STARTUP = ("Started via /clear from Telegram. Send",
+           "Extra session opened via /new in Telegram, next to the existing ones. Send",
+           "Model switched to ", "Permission mode switched to ", "Effort switched to ",
+           "Session reloaded via /reload", "This earlier conversation was resumed via /resume")
+
+
+def env_file():
+    """KEY=value pairs from ~/.config/claude-tg.env."""
+    out = {}
+    try:
+        for line in ENV_FILE.read_text().splitlines():
+            k, eq, v = line.partition("=")
+            if eq and k.strip() and not k.lstrip().startswith("#"):
+                out[k.strip()] = os.path.expandvars(v.strip().strip("\"'"))
+    except OSError:
+        pass
+    return out
 
 
 def setting(name, default):
     """From the environment, else from ~/.config/claude-tg.env."""
-    if os.environ.get(name):
+    if name in os.environ:
         return os.environ[name]
+    return env_file().get(name, default)
+
+
+def load(path, default):
     try:
-        for line in (Path.home() / ".config/claude-tg.env").read_text().splitlines():
-            if line.startswith(f"{name}="):
-                return os.path.expandvars(line.split("=", 1)[1].strip().strip('"'))
-    except OSError:
-        pass
-    return default
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def use(pid):
+    """Ask the relay to make session <pid> the active one."""
+    with socket.socket(socket.AF_UNIX) as s:
+        s.settimeout(5)
+        s.connect(str(TG / "relay.sock"))
+        s.sendall(json.dumps({"t": "use", "pid": pid}).encode() + b"\n")
+        return json.loads(s.makefile().readline() or "{}").get("ok", False)
+
+
+def user_text(e):
+    """Text of a user entry, or None for tool results and the like."""
+    if e.get("type") != "user":
+        return None
+    c = (e.get("message") or {}).get("content")
+    if isinstance(c, list):
+        c = " ".join(x.get("text", "") for x in c if x.get("type") == "text")
+    if not isinstance(c, str) or not c.strip() or c.startswith(NOISE):
+        return None
+    m = re.search(r"<channel [^>]*>(.*?)</channel>", c, re.S)
+    return m.group(1) if m else c
 
 
 def first_prompt(path):
-    """First real user request, or None (side task, automatic prompt)."""
+    """First real user request, or None (side task, nothing but automatic prompts)."""
     with open(path, "rb") as fh:
         head = fh.read(HEAD_BYTES).decode(errors="replace").splitlines()
     for line in head:
         try:
-            e = json.loads(line)
+            c = user_text(json.loads(line))
         except ValueError:
             continue
-        if e.get("type") != "user":
+        if c is None or c.startswith(STARTUP + EXTRA_STARTUP):
             continue
-        c = (e.get("message") or {}).get("content")
-        if isinstance(c, list):
-            c = " ".join(x.get("text", "") for x in c if x.get("type") == "text")
-        if not isinstance(c, str) or not c.strip() or c.startswith(("<system-reminder>", "<local-command", "<command-", "This session is being continued", "Caveat:")):
-            continue
-        if c.startswith(SKIP):
+        if c.startswith(SIDE_TASK + EXTRA_SIDE_TASK):
             return None
-        m = re.search(r"<channel [^>]*>(.*?)</channel>", c, re.S)
-        return re.sub(r"\s+", " ", m.group(1) if m else c).strip()
+        return re.sub(r"\s+", " ", c).strip()
     return None
 
 
+def excerpt(path, limit=4000):
+    """The user's requests and the Telegram replies, as input for the summary."""
+    parts = []
+    with open(path, "rb") as fh:
+        for line in fh:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            c = user_text(e)
+            if c is not None:
+                parts.append("User: " + c)
+                continue
+            content = (e.get("message") or {}).get("content")
+            if e.get("type") == "assistant" and isinstance(content, list):
+                for x in content:
+                    if x.get("type") == "tool_use" and x.get("name", "").endswith("__reply"):
+                        parts.append("Claude: " + str((x.get("input") or {}).get("text", "")))
+    parts = [re.sub(r"\s+", " ", p).strip()[:300] for p in parts if p.strip()]
+    text = "\n".join(parts)
+    if len(text) > limit:  # beginning and end: that's where the topic and the outcome are
+        text = text[:limit * 2 // 3] + "\n…\n" + text[-limit // 3:]
+    return text
+
+
+def summarize(path):
+    """One line about the topic, from a headless call without plugins, hooks,
+    MCP servers, tools or a saved transcript."""
+    prompt = ("Below is a Claude Code conversation (the user's requests, Claude's replies). "
+              f"Give its topic in one short line of at most {LABEL_MAX - 12} characters, in the "
+              "language of the conversation, without quotes, full stop or introduction. "
+              "Only that line.\n\n" + excerpt(path))
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("CLAUDE_CODE_", "TELEGRAM_")) and k not in ("CLAUDECODE", "CLAUDE_PID")}
+    env.update(env_file())  # the long-lived token, like the background sessions
+    cwd = TITLES.parent / "titles"
+    cwd.mkdir(parents=True, exist_ok=True)
+    try:
+        r = subprocess.run(["claude", "-p", "--model", TITLE_MODEL, "--setting-sources", "",
+                            "--settings", '{"enabledPlugins":{"telegram@claude-plugins-official":false}}',
+                            "--strict-mcp-config", "--no-session-persistence", "--disable-slash-commands",
+                            "--tools", ""], input=prompt, capture_output=True, text=True,
+                           timeout=TITLE_WAIT, cwd=cwd, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    t = (r.stdout or "").strip().splitlines()
+    if r.returncode or not t:
+        return None
+    return t[0].strip(" .\"'*")[:LABEL_MAX]
+
+
+def titles_for(paths):
+    """{session-id: summary}; summarizes new or much grown conversations in parallel."""
+    cache = load(TITLES, {})
+    todo = [p for p in paths if p.stem not in cache or p.stat().st_size > 1.5 * cache[p.stem].get("size", 0)]
+    if todo and TITLE_MODEL:
+        pool = ThreadPoolExecutor(len(todo))
+        futs = {pool.submit(summarize, p): p for p in todo}
+        done, _ = wait(futs, timeout=TITLE_WAIT + 1)
+        pool.shutdown(wait=False, cancel_futures=True)
+        for f in done:
+            p = futs[f]
+            try:
+                t = f.result()
+            except Exception:
+                t = None
+            if t:
+                cache[p.stem] = {"title": t, "size": p.stat().st_size}
+        TITLES.parent.mkdir(parents=True, exist_ok=True)
+        tmp = TITLES.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=0))
+        tmp.replace(TITLES)
+        # claude -p creates an empty project directory despite --no-session-persistence.
+        subprocess.run(["rm", "-rf", str(project_dir(TITLES.parent / "titles"))])
+    return {k: v["title"] for k, v in cache.items()}
+
+
+def project_dir(cwd):
+    """Claude Code stores transcripts per project, named after the working
+    directory with every non-alphanumeric character replaced by "-"."""
+    return HOME / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(Path(cwd).resolve()))
+
+
+def shorten(s, n=LABEL_MAX):
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def prefixes(name):
+    """Extra prompt prefixes, separated by |, e.g. from prompts you changed."""
+    return tuple(p for p in setting(name, "").split("|") if p)
+
+
 if len(sys.argv) < 2:
-    sys.exit("usage: claude-tg-resume list [n] | <session-id>")
+    sys.exit("usage: claude-tg-resume list [n] | <session-id> | use-<pid>")
+
+if sys.argv[1].startswith("use-"):
+    ok = False
+    try:
+        ok = use(int(sys.argv[1][4:]))
+    except (OSError, ValueError):
+        pass
+    if not ok:
+        subprocess.run(["tg-send", "That session isn't open any more."])
+    sys.exit(0 if ok else 1)
 
 if sys.argv[1] != "list":
     os.execvp("claude-tg-session", ["claude-tg-session", "resume", sys.argv[1]])
 
-# Claude Code stores transcripts per project, named after the working directory
-# with every non-alphanumeric character replaced by "-".
-cwd = str(Path(setting("CLAUDE_TG_CWD", str(Path.home()))).resolve())
-project = Path.home() / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", cwd)
+TITLE_MODEL = setting("CLAUDE_TG_TITLE_MODEL", "haiku")
+EXTRA_STARTUP = prefixes("CLAUDE_TG_RESUME_SKIP")
+EXTRA_SIDE_TASK = prefixes("CLAUDE_TG_RESUME_HIDE")
+project = project_dir(setting("CLAUDE_TG_CWD", str(HOME)))
 try:
     offset = max(int(sys.argv[2]), 0) if len(sys.argv) > 2 else 0
 except ValueError:
     offset = 0
 cur = json.loads(subprocess.run(["claude-tg-current"], capture_output=True, text=True,
                                 timeout=30).stdout or "{}")
+names = load(TG / "session-names.json", {})
+relay = load(TG / "relay-state.json", {}) if (TG / "relay.sock").exists() else {}
+open_ids = {cur.get("sessionId")}
+seen = set()
+open_rows = []  # (pid, label, transcript)
+for s in sorted(relay.get("sessions", []), key=lambda s: s.get("slot", 0)):
+    open_ids.add(s.get("sessionId"))
+    f = project / f"{s.get('sessionId')}.jsonl"
+    if f.exists():
+        seen.add(first_prompt(f))
+    if s.get("pid") == relay.get("active") or offset:  # open sessions only on the first page
+        continue
+    open_rows.append((s["pid"], s.get("label", s["pid"]), f if f.exists() else None))
+
+rows = []  # (transcript, first request)
 files = sorted(project.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
-found, seen = 0, set()
 for f in files[:400]:
-    if f.stem == cur.get("sessionId"):
+    if f.stem in open_ids:
         continue
     p = first_prompt(f)
     # Forks (/model, /mode, …) share the first request: show only the newest.
     if not p or p in seen:
         continue
     seen.add(p)
-    found += 1
-    if found > offset + SHOW:  # one extra: are there older ones?
+    rows.append((f, p))
+    if len(rows) > offset + SHOW:  # one extra: are there older ones?
         break
-    if found <= offset:
-        continue
-    when = datetime.fromtimestamp(f.stat().st_mtime).strftime("%m-%d %H:%M")
-    label = p if len(p) <= 38 else p[:37] + "…"
-    print(f"{f.stem}\t{when} {label}")
+older = len(rows) > offset + SHOW
+rows = rows[offset:offset + SHOW]
+
+titles = titles_for([f for _, _, f in open_rows if f and not names.get(f.stem)] +
+                    [f for f, _ in rows if not names.get(f.stem)])
+
+for pid, label, f in open_rows:
+    t = f and (names.get(f.stem) or titles.get(f.stem))
+    print(f"use-{pid}\t● {shorten(f'{label} {t}') if t else label} (open)")
+for f, p in rows:
+    when = datetime.fromtimestamp(f.stat().st_mtime).strftime("%d %b %H:%M")
+    if names.get(f.stem):
+        label = f"{names[f.stem]} · {when}"
+    else:
+        label = f"{when} {shorten(titles.get(f.stem) or p, LABEL_MAX - 13)}"
+    print(f"{f.stem}\t{label}")
 if offset:
     print(f"page-{max(offset - SHOW, 0)}\t◂ Newer")
-if found > offset + SHOW:
+if older:
     print(f"page-{offset + SHOW}\tOlder ▸")
