@@ -21,7 +21,7 @@ import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
-import { execFileSync } from 'child_process'
+import { execFileSync, spawn } from 'child_process'
 import { join, extname, sep } from 'path'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
@@ -705,7 +705,10 @@ bot.command('help', async ctx => {
     `Messages you send here route to a paired Claude Code session. ` +
     `Text and photos are forwarded; replies and reactions come back.\n\n` +
     `/start — pairing instructions\n` +
-    `/status — check your pairing state`
+    `/status — check your pairing state` +
+    (CLEAR_CMD ? `\n/clear [prompt] — start a fresh session` : '') +
+    (BTW_CMD ? `\n/btw <task> — run a side task in a separate session` : '') +
+    (MODEL_CMD ? `\n/model — switch the session's model` : '')
   )
 })
 
@@ -730,6 +733,96 @@ bot.command('status', async ctx => {
   }
 
   await ctx.reply(`Not paired. Send me a message to get a pairing code.`)
+})
+
+// Session commands: /clear, /btw and /model hand off to operator-supplied
+// scripts, configured in the state-dir .env (paths stay out of this repo):
+//   TELEGRAM_CLEAR_CMD  — run as `<cmd> [prompt]`: start a fresh session
+//   TELEGRAM_BTW_CMD    — run as `<cmd> <task>`: start a side session
+//   TELEGRAM_MODEL_CMD  — run as `<cmd> <model>`: restart on another model
+//   TELEGRAM_MODELS     — button list for /model, `label=model,...`
+//                         (default: opus, sonnet, haiku)
+// They are handled here rather than forwarded, so they still work while the
+// session is busy or stuck on a prompt. The scripts run detached: /clear and
+// /model typically replace the session that owns this server process.
+const CLEAR_CMD = process.env.TELEGRAM_CLEAR_CMD
+const BTW_CMD = process.env.TELEGRAM_BTW_CMD
+const MODEL_CMD = process.env.TELEGRAM_MODEL_CMD
+const MODELS: { label: string; model: string }[] =
+  (process.env.TELEGRAM_MODELS ?? 'opus=opus,sonnet=sonnet,haiku=haiku')
+    .split(',')
+    .map(e => e.trim())
+    .filter(Boolean)
+    .map(e => {
+      const [label, model] = e.includes('=') ? e.split('=', 2) : [e, e]
+      return { label: label.trim(), model: model.trim() }
+    })
+
+// Stricter than dmCommandGate: these act on the machine, so only allowlisted
+// senders — never someone who merely has a pending pairing.
+function ownerGate(ctx: Context): boolean {
+  const gated = dmCommandGate(ctx)
+  return !!gated && gated.access.allowFrom.includes(gated.senderId)
+}
+
+function runDetached(cmd: string, args: string[]): void {
+  const child = spawn(cmd, args, { detached: true, stdio: 'ignore' })
+  child.on('error', err => {
+    process.stderr.write(`telegram channel: ${cmd} failed: ${err}\n`)
+  })
+  child.unref()
+}
+
+bot.command('clear', async ctx => {
+  if (!ownerGate(ctx)) return
+  if (!CLEAR_CMD) {
+    await ctx.reply('/clear is not configured (TELEGRAM_CLEAR_CMD).')
+    return
+  }
+  const prompt = String(ctx.match ?? '').trim()
+  await ctx.reply('Starting a fresh session…')
+  runDetached(CLEAR_CMD, prompt ? [prompt] : [])
+})
+
+bot.command('btw', async ctx => {
+  if (!ownerGate(ctx)) return
+  if (!BTW_CMD) {
+    await ctx.reply('/btw is not configured (TELEGRAM_BTW_CMD).')
+    return
+  }
+  const task = String(ctx.match ?? '').trim()
+  if (!task) {
+    await ctx.reply('Usage: /btw <task>')
+    return
+  }
+  runDetached(BTW_CMD, [task])
+})
+
+bot.command('model', async ctx => {
+  if (!ownerGate(ctx)) return
+  if (!MODEL_CMD) {
+    await ctx.reply('/model is not configured (TELEGRAM_MODEL_CMD).')
+    return
+  }
+  const kb = new InlineKeyboard()
+  MODELS.forEach((m, i) => kb.text(m.label, `model:${i}`))
+  await ctx.reply('Switch the session to:', { reply_markup: kb })
+})
+
+bot.callbackQuery(/^model:(\d+)$/, async ctx => {
+  const access = loadAccess()
+  if (!access.allowFrom.includes(String(ctx.from.id)) || !MODEL_CMD) {
+    await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+    return
+  }
+  const choice = MODELS[Number(ctx.match[1])]
+  if (!choice) {
+    await ctx.answerCallbackQuery().catch(() => {})
+    return
+  }
+  await ctx.answerCallbackQuery({ text: `Switching to ${choice.label}…` }).catch(() => {})
+  await ctx.editMessageText(`Switching to ${choice.label}…`).catch(() => {})
+  runDetached(MODEL_CMD, [choice.model])
 })
 
 // Inline-button handler for permission requests. Callback data is
@@ -1016,6 +1109,9 @@ void (async () => {
               { command: 'start', description: 'Welcome and setup guide' },
               { command: 'help', description: 'What this bot can do' },
               { command: 'status', description: 'Check your pairing status' },
+              ...(CLEAR_CMD ? [{ command: 'clear', description: 'Start a fresh session' }] : []),
+              ...(BTW_CMD ? [{ command: 'btw', description: 'Run a side task in a separate session' }] : []),
+              ...(MODEL_CMD ? [{ command: 'model', description: "Switch the session's model" }] : []),
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})

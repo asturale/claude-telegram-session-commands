@@ -96,3 +96,28 @@ assistant needs earlier context, it will ask you to paste or summarize.
 This also means there's no `download_attachment` tool for historical messages
 — photos are downloaded eagerly on arrival since there's no way to fetch them
 later.
+
+## Session commands (fork addition)
+
+Optional DM commands that act on the Claude Code session itself. The bot
+handles them directly instead of forwarding them, so they also work while the
+session is busy or waiting on a permission prompt. Only allowlisted senders can
+use them. Each one runs an operator-supplied command, configured in
+`~/.claude/channels/telegram/.env`; commands without a configured command stay hidden.
+
+| Command | Variable | Invoked as |
+| --- | --- | --- |
+| `/clear [prompt]` | `TELEGRAM_CLEAR_CMD` | `<cmd> [prompt]`: start a fresh session |
+| `/btw <task>` | `TELEGRAM_BTW_CMD` | `<cmd> <task>`: run a side task in a separate session |
+| `/model` | `TELEGRAM_MODEL_CMD` | `<cmd> <model>`, after picking from inline buttons |
+
+`TELEGRAM_MODELS` sets the `/model` buttons as `label=model,...`
+(default `opus=opus,sonnet=sonnet,haiku=haiku`).
+
+The command is spawned detached, because `/clear` and `/model` usually replace
+the session that owns the bot process. A typical script starts the new session
+(`claude --bg --channels plugin:telegram@claude-plugins-official ...`, adding
+`--resume <session-id> --fork-session --model <model>` for `/model`), waits for
+its poller to take over `bot.pid` in the state dir, then stops the old session.
+A `/btw` session should run without this plugin (only one poller per bot token
+can run) and report back through the Bot API's `sendMessage`.
