@@ -28,8 +28,10 @@ jobs:
 
       - name: Split upstream plugin history
         run: |
-          git clone --filter=blob:none --no-checkout -q \
+          # subtree split needs the prefix checked out; a sparse checkout is enough.
+          git clone --filter=blob:none --sparse -q \
             https://github.com/anthropics/claude-plugins-official.git "$RUNNER_TEMP/upstream"
+          git -C "$RUNNER_TEMP/upstream" sparse-checkout set external_plugins/telegram
           git -C "$RUNNER_TEMP/upstream" subtree split -q \
             --prefix=external_plugins/telegram origin/main -b telegram-split
           git fetch -q "$RUNNER_TEMP/upstream" telegram-split
