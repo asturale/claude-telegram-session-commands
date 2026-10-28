@@ -2,9 +2,10 @@
 
 A fork of the official [Telegram channel plugin](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram)
 for Claude Code. It adds bot commands that manage the Claude Code session
-itself from your phone: start a fresh session, run a side task, switch model or
-permission mode, compact the conversation, check status and follow progress
-live.
+itself from your phone: start a fresh session, interrupt or reload it, run and
+manage side tasks, switch model, permission mode or effort, go back to an
+earlier conversation, compact, save notes to memory, check usage and follow
+progress live.
 
 Everything else is the upstream plugin, unchanged. A daily GitHub Action merges
 new upstream changes into this repository (see [Staying in sync](#staying-in-sync)).
@@ -15,10 +16,17 @@ The upstream documentation is in [README.md](../README.md) and [ACCESS.md](../AC
 | Command | What it does | Configured by |
 | --- | --- | --- |
 | `/clear [prompt]` | Start a fresh session, optionally with a first prompt | `TELEGRAM_CLEAR_CMD` |
-| `/btw <task>` | Run a side task in a separate session that reports back | `TELEGRAM_BTW_CMD` |
+| `/stop` | Interrupt the current turn (like Esc) | `TELEGRAM_STOP_CMD` |
+| `/reload` | Restart the session, same conversation (reloads MCP servers and settings) | `TELEGRAM_RELOAD_CMD` |
+| `/resume` | Buttons with recent conversations; tap one to continue it | `TELEGRAM_RESUME_CMD` |
 | `/model` | Pick a model from inline buttons; the conversation continues on it | `TELEGRAM_MODEL_CMD`, `TELEGRAM_MODELS` |
 | `/mode` | Pick a permission mode from inline buttons | `TELEGRAM_MODE_CMD`, `TELEGRAM_MODES` |
+| `/effort` | Pick an effort level from inline buttons | `TELEGRAM_EFFORT_CMD`, `TELEGRAM_EFFORTS` |
 | `/compact [instructions]` | Compact the conversation | `TELEGRAM_COMPACT_CMD` |
+| `/btw <task>` | Run a side task in a separate session that reports back | `TELEGRAM_BTW_CMD` |
+| `/tasks` | List side tasks; tap for the latest result, or stop one | `TELEGRAM_TASKS_CMD` |
+| `/remember <text>` | Save a note to Claude's memory | `TELEGRAM_REMEMBER_CMD` |
+| `/usage` | Plan limits and token usage | `TELEGRAM_USAGE_CMD` |
 | `/status` | Pairing status, plus the output of your status script | `TELEGRAM_STATUS_CMD` |
 | `/progress` | One message that updates live while the session works, with a stop button | `TELEGRAM_PROGRESS_CMD` |
 
@@ -37,14 +45,27 @@ The plugin does not hard-code how sessions are started or stopped. Each command
 runs an executable that you point to in `~/.claude/channels/telegram/.env`:
 
 ```sh
+# Actions (spawned detached)
 TELEGRAM_CLEAR_CMD=/path/to/clear-script
+TELEGRAM_STOP_CMD=/path/to/stop-script
+TELEGRAM_RELOAD_CMD=/path/to/reload-script
+TELEGRAM_COMPACT_CMD=/path/to/compact-script
 TELEGRAM_BTW_CMD=/path/to/btw-script
+TELEGRAM_REMEMBER_CMD=/path/to/remember-script
+# Reports (stdout is the reply)
+TELEGRAM_USAGE_CMD=/path/to/usage-script
+TELEGRAM_STATUS_CMD=/path/to/status-script
+# Switchers (inline buttons, then `<cmd> <value>`)
 TELEGRAM_MODEL_CMD=/path/to/model-script
 TELEGRAM_MODELS=Opus=opus,Sonnet=sonnet,Haiku=haiku
 TELEGRAM_MODE_CMD=/path/to/mode-script
 TELEGRAM_MODES=Auto=auto,Accept edits=acceptEdits,Manual=manual
-TELEGRAM_COMPACT_CMD=/path/to/compact-script
-TELEGRAM_STATUS_CMD=/path/to/status-script
+TELEGRAM_EFFORT_CMD=/path/to/effort-script
+TELEGRAM_EFFORTS=low,medium,high,xhigh,max
+# Pickers (`<cmd> list` gives the buttons)
+TELEGRAM_RESUME_CMD=/path/to/resume-script
+TELEGRAM_TASKS_CMD=/path/to/tasks-script
+# Live progress
 TELEGRAM_PROGRESS_CMD=/path/to/progress-script
 TELEGRAM_PROGRESS_INTERVAL=5        # seconds between updates
 TELEGRAM_PROGRESS_MAX_MINUTES=15    # stop following after this
@@ -53,18 +74,23 @@ TELEGRAM_PROGRESS_MAX_MINUTES=15    # stop following after this
 | Variable | Invoked as |
 | --- | --- |
 | `TELEGRAM_CLEAR_CMD` | `<cmd> [prompt]` |
-| `TELEGRAM_BTW_CMD` | `<cmd> <task>` |
-| `TELEGRAM_MODEL_CMD` | `<cmd> <model>` |
-| `TELEGRAM_MODE_CMD` | `<cmd> <permission-mode>` |
+| `TELEGRAM_STOP_CMD`, `TELEGRAM_RELOAD_CMD` | `<cmd>` |
 | `TELEGRAM_COMPACT_CMD` | `<cmd> [instructions]` |
+| `TELEGRAM_BTW_CMD` | `<cmd> <task>` |
+| `TELEGRAM_REMEMBER_CMD` | `<cmd> <text>` |
+| `TELEGRAM_USAGE_CMD` | `<cmd>`; stdout is the reply (30 s timeout) |
 | `TELEGRAM_STATUS_CMD` | `<cmd>`; stdout is appended to `/status` (30 s timeout) |
+| `TELEGRAM_MODEL_CMD`, `TELEGRAM_MODE_CMD`, `TELEGRAM_EFFORT_CMD` | `<cmd> <value>` |
+| `TELEGRAM_RESUME_CMD` | `<cmd> list` prints `value<TAB>label` lines; `<cmd> <value>` on tap |
+| `TELEGRAM_TASKS_CMD` | `<cmd> list` as above; `<cmd> result <value>` or `<cmd> stop <value>` on tap, stdout is the reply |
 | `TELEGRAM_PROGRESS_CMD` | `<cmd>`, repeatedly; stdout is the message, exit 0 = still busy, anything else = done |
 
-`TELEGRAM_MODELS` and `TELEGRAM_MODES` are `label=value` lists separated by
-commas. The defaults are `opus,sonnet,haiku` and `auto,acceptEdits,manual`.
+`TELEGRAM_MODELS`, `TELEGRAM_MODES` and `TELEGRAM_EFFORTS` are `label=value`
+lists separated by commas. Picker values must match `[A-Za-z0-9_.-]{1,40}`,
+so they fit in Telegram's callback data.
 
-All commands except `/status` and `/progress` are spawned detached, because `/clear`, `/model`
-and `/mode` usually replace the session that owns the bot process.
+Actions, switchers and `/resume` are spawned detached, because most of them
+replace the session that owns the bot process.
 
 ### Writing the scripts
 
@@ -91,9 +117,16 @@ Some notes from building a working set:
   has everything you need. Take the last real user message, the `tool_use`
   entries after it, and the latest assistant text. Read only the end of
   the file, because the script runs every few seconds.
-- **Compacting**: background sessions have no CLI input. A script can run
-  `claude attach <id>` in a pseudo-terminal, type `/compact` and Enter, and
+- **Typing into a session** (`/compact`, `/stop`): background sessions have no
+  CLI input. A script can run `claude attach <id>` in a pseudo-terminal,
+  wait for the UI, send `/compact` + Enter (or a bare Esc to interrupt), and
   close the attach client. The session keeps running.
+- **Effort**: restart with `--effort <level>` rather than typing `/effort`.
+  Typing it also saves the level as the default for new sessions.
+- **Usage**: the CLI's own `/usage` reads `api.anthropic.com/api/oauth/usage`.
+  That endpoint rate-limits hard, so cache the answer and respect
+  `retry-after`. Token totals per model can also be added up from the
+  `usage` fields in the transcripts.
 
 ## Installing
 

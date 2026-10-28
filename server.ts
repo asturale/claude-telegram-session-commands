@@ -700,18 +700,15 @@ bot.command('start', async ctx => {
 })
 
 bot.command('help', async ctx => {
-  if (!dmCommandGate(ctx)) return
+  const gated = dmCommandGate(ctx)
+  if (!gated) return
+  const owner = gated.access.allowFrom.includes(gated.senderId)
   await ctx.reply(
     `Messages you send here route to a paired Claude Code session. ` +
     `Text and photos are forwarded; replies and reactions come back.\n\n` +
     `/start — pairing instructions\n` +
-    `/status — check your pairing state` +
-    (CLEAR_CMD ? `\n/clear [prompt] — start a fresh session` : '') +
-    (BTW_CMD ? `\n/btw <task> — run a side task in a separate session` : '') +
-    (MODEL_CMD ? `\n/model — switch the session's model` : '') +
-    (MODE_CMD ? `\n/mode — switch the permission mode` : '') +
-    (COMPACT_CMD ? `\n/compact [instructions] — compact the conversation` : '') +
-    (PROGRESS_CMD ? `\n/progress — follow what the session is doing, live` : '')
+    `/status — check your pairing state`
+      + (owner ? sessionMenu.map(m => `\n${m.help}`).join('') : '')
   )
 })
 
@@ -746,37 +743,43 @@ bot.command('status', async ctx => {
   await ctx.reply(`Not paired. Send me a message to get a pairing code.`)
 })
 
-// Session commands: /clear, /btw and /model hand off to operator-supplied
-// scripts, configured in the state-dir .env (paths stay out of this repo):
-//   TELEGRAM_CLEAR_CMD  — run as `<cmd> [prompt]`: start a fresh session
-//   TELEGRAM_BTW_CMD    — run as `<cmd> <task>`: start a side session
-//   TELEGRAM_MODEL_CMD  — run as `<cmd> <model>`: restart on another model
-//   TELEGRAM_MODELS     — button list for /model, `label=model,...`
-//                         (default: opus, sonnet, haiku)
-//   TELEGRAM_MODE_CMD   — run as `<cmd> <mode>`: restart in another
-//                         permission mode
-//   TELEGRAM_MODES      — button list for /mode, `label=mode,...`
-//                         (default: auto, acceptEdits, manual)
-//   TELEGRAM_COMPACT_CMD — run as `<cmd> [instructions]`: compact the session
-//   TELEGRAM_STATUS_CMD — run as `<cmd>`; its stdout is appended to /status
-//                         for the owner (waited for, 30s timeout)
-//   TELEGRAM_PROGRESS_CMD — run as `<cmd>` every TELEGRAM_PROGRESS_INTERVAL
-//                         seconds (default 5) while /progress is followed;
-//                         stdout is the message text, exit 0 = still working,
-//                         any other exit = done (stop following). Following
-//                         ends after TELEGRAM_PROGRESS_MAX_MINUTES (default 15).
-// They are handled here rather than forwarded, so they still work while the
-// session is busy or stuck on a prompt. The scripts run detached: /clear and
-// /model typically replace the session that owns this server process.
-const CLEAR_CMD = process.env.TELEGRAM_CLEAR_CMD
-const BTW_CMD = process.env.TELEGRAM_BTW_CMD
-const MODEL_CMD = process.env.TELEGRAM_MODEL_CMD
-const MODE_CMD = process.env.TELEGRAM_MODE_CMD
-const COMPACT_CMD = process.env.TELEGRAM_COMPACT_CMD
+// Session commands. Each one hands off to an operator-supplied executable,
+// configured in the state-dir .env, so no paths or machine details live in this
+// repo. They are handled here rather than forwarded, so they still work while
+// the session is busy or stuck on a permission prompt. Owner-only.
+//
+// Actions — spawned detached (they may replace the session that owns this
+// process), with a short acknowledgement:
+//   TELEGRAM_CLEAR_CMD    `<cmd> [prompt]`        /clear: start a fresh session
+//   TELEGRAM_BTW_CMD      `<cmd> <task>`          /btw: start a side session
+//   TELEGRAM_COMPACT_CMD  `<cmd> [instructions]`  /compact: compact the session
+//   TELEGRAM_STOP_CMD     `<cmd>`                 /stop: interrupt the current turn
+//   TELEGRAM_RELOAD_CMD   `<cmd>`                 /reload: restart, same conversation
+//   TELEGRAM_REMEMBER_CMD `<cmd> <text>`          /remember: save a note to memory
+// Reports — waited for (30s), stdout is the reply:
+//   TELEGRAM_USAGE_CMD    `<cmd>`                 /usage
+//   TELEGRAM_STATUS_CMD   `<cmd>`                 appended to /status
+// Switchers — inline buttons from a `label=value,...` list, then `<cmd> <value>`:
+//   TELEGRAM_MODEL_CMD  + TELEGRAM_MODELS   /model  (default opus, sonnet, haiku)
+//   TELEGRAM_MODE_CMD   + TELEGRAM_MODES    /mode   (default auto, acceptEdits, manual)
+//   TELEGRAM_EFFORT_CMD + TELEGRAM_EFFORTS  /effort (default low … max)
+// Pickers — `<cmd> list` prints `value<TAB>label` lines, one button row each:
+//   TELEGRAM_RESUME_CMD  /resume: `<cmd> <value>` (detached) on tap
+//   TELEGRAM_TASKS_CMD   /tasks: `<cmd> result <value>` or `<cmd> stop <value>`,
+//                        stdout is the reply
+// Live:
+//   TELEGRAM_PROGRESS_CMD `<cmd>` every TELEGRAM_PROGRESS_INTERVAL seconds
+//   (default 5) while /progress is followed; stdout is the message text,
+//   exit 0 = still working, any other exit = done. Following ends after
+//   TELEGRAM_PROGRESS_MAX_MINUTES (default 15).
 const STATUS_CMD = process.env.TELEGRAM_STATUS_CMD
 const PROGRESS_CMD = process.env.TELEGRAM_PROGRESS_CMD
 const PROGRESS_INTERVAL_MS = Math.max(2, Number(process.env.TELEGRAM_PROGRESS_INTERVAL) || 5) * 1000
 const PROGRESS_MAX_MS = Math.max(1, Number(process.env.TELEGRAM_PROGRESS_MAX_MINUTES) || 15) * 60_000
+
+// Configured session commands, in registration order: feeds /help and the
+// bot menu.
+const sessionMenu: { command: string; description: string; help: string }[] = []
 
 function parseChoices(spec: string): { label: string; value: string }[] {
   return spec
@@ -788,14 +791,18 @@ function parseChoices(spec: string): { label: string; value: string }[] {
       return { label: label.trim(), value: value.trim() }
     })
 }
-const MODELS = parseChoices(process.env.TELEGRAM_MODELS ?? 'opus=opus,sonnet=sonnet,haiku=haiku')
-const MODES = parseChoices(process.env.TELEGRAM_MODES ?? 'auto,acceptEdits,manual')
 
 // Stricter than dmCommandGate: these act on the machine, so only allowlisted
 // senders — never someone who merely has a pending pairing.
 function ownerGate(ctx: Context): boolean {
   const gated = dmCommandGate(ctx)
   return !!gated && gated.access.allowFrom.includes(gated.senderId)
+}
+
+async function ownerCallback(ctx: Context): Promise<boolean> {
+  if (ctx.from && loadAccess().allowFrom.includes(String(ctx.from.id))) return true
+  await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+  return false
 }
 
 function runDetached(cmd: string, args: string[]): void {
@@ -806,55 +813,76 @@ function runDetached(cmd: string, args: string[]): void {
   child.unref()
 }
 
-bot.command('clear', async ctx => {
-  if (!ownerGate(ctx)) return
-  if (!CLEAR_CMD) {
-    await ctx.reply('/clear is not configured (TELEGRAM_CLEAR_CMD).')
-    return
-  }
-  const prompt = String(ctx.match ?? '').trim()
-  await ctx.reply('Starting a fresh session…')
-  runDetached(CLEAR_CMD, prompt ? [prompt] : [])
-})
+function runOutput(cmd: string, args: string[], timeout = 30000): Promise<{ text: string; ok: boolean }> {
+  return new Promise(resolve => {
+    execFile(cmd, args, { timeout, encoding: 'utf8' }, (err, stdout) => {
+      const text = (stdout ?? '').trim() || (err ? `Command failed: ${err.message}` : '(no output)')
+      resolve({ text: text.slice(0, 3900), ok: !err })
+    })
+  })
+}
 
-bot.command('btw', async ctx => {
-  if (!ownerGate(ctx)) return
-  if (!BTW_CMD) {
-    await ctx.reply('/btw is not configured (TELEGRAM_BTW_CMD).')
-    return
-  }
-  const task = String(ctx.match ?? '').trim()
-  if (!task) {
-    await ctx.reply('Usage: /btw <task>')
-    return
-  }
-  runDetached(BTW_CMD, [task])
-})
+// Actions.
+const actions = [
+  { name: 'clear', env: 'TELEGRAM_CLEAR_CMD', arg: 'optional', ack: 'Starting a fresh session…',
+    description: 'Start a fresh session', help: '/clear [prompt] — start a fresh session' },
+  { name: 'btw', env: 'TELEGRAM_BTW_CMD', arg: 'required', ack: '',
+    description: 'Run a side task in a separate session', help: '/btw <task> — run a side task in a separate session' },
+  { name: 'compact', env: 'TELEGRAM_COMPACT_CMD', arg: 'optional', ack: 'Compacting the conversation…',
+    description: 'Compact the conversation', help: '/compact [instructions] — compact the conversation' },
+  { name: 'stop', env: 'TELEGRAM_STOP_CMD', arg: 'none', ack: 'Interrupting the current turn…',
+    description: 'Interrupt the current turn', help: '/stop — interrupt the current turn' },
+  { name: 'reload', env: 'TELEGRAM_RELOAD_CMD', arg: 'none', ack: 'Reloading the session…',
+    description: 'Restart the session, same conversation', help: '/reload — restart the session, same conversation' },
+  { name: 'remember', env: 'TELEGRAM_REMEMBER_CMD', arg: 'required', ack: 'Saving to memory…',
+    description: 'Save a note to memory', help: '/remember <text> — save a note to memory' },
+]
 
-bot.command('compact', async ctx => {
+for (const a of actions) {
+  const cmd = process.env[a.env]
+  if (cmd) sessionMenu.push({ command: a.name, description: a.description, help: a.help })
+  bot.command(a.name, async ctx => {
+    if (!ownerGate(ctx)) return
+    if (!cmd) {
+      await ctx.reply(`/${a.name} is not configured (${a.env}).`)
+      return
+    }
+    const arg = String(ctx.match ?? '').trim()
+    if (a.arg === 'required' && !arg) {
+      await ctx.reply(`Usage: ${a.help.split(' — ')[0]}`)
+      return
+    }
+    if (a.ack) await ctx.reply(a.ack)
+    runDetached(cmd, a.arg !== 'none' && arg ? [arg] : [])
+  })
+}
+
+// Reports.
+const USAGE_CMD = process.env.TELEGRAM_USAGE_CMD
+if (USAGE_CMD) {
+  sessionMenu.push({ command: 'usage', description: 'Plan limits and token usage', help: '/usage — plan limits and token usage' })
+}
+bot.command('usage', async ctx => {
   if (!ownerGate(ctx)) return
-  if (!COMPACT_CMD) {
-    await ctx.reply('/compact is not configured (TELEGRAM_COMPACT_CMD).')
+  if (!USAGE_CMD) {
+    await ctx.reply('/usage is not configured (TELEGRAM_USAGE_CMD).')
     return
   }
-  const instructions = String(ctx.match ?? '').trim()
-  await ctx.reply('Compacting the conversation…')
-  runDetached(COMPACT_CMD, instructions ? [instructions] : [])
+  await ctx.reply((await runOutput(USAGE_CMD, [])).text)
 })
 
 // /progress: post the output of PROGRESS_CMD and keep editing that message
 // while the command reports the session as busy. One follower per chat.
 const progressFollowers = new Map<string, () => void>()
 
-function runProgress(): Promise<{ text: string; busy: boolean }> {
-  return new Promise(resolve => {
-    execFile(PROGRESS_CMD!, [], { timeout: 20000, encoding: 'utf8' }, (err, stdout) => {
-      const text = (stdout ?? '').trim() || (err ? `Progress command failed: ${err.message}` : '(no output)')
-      resolve({ text: text.slice(0, 3900), busy: !err })
-    })
-  })
+async function runProgress(): Promise<{ text: string; busy: boolean }> {
+  const { text, ok } = await runOutput(PROGRESS_CMD!, [], 20000)
+  return { text, busy: ok }
 }
 
+if (PROGRESS_CMD) {
+  sessionMenu.push({ command: 'progress', description: 'Follow what the session is doing, live', help: '/progress — follow what the session is doing, live' })
+}
 bot.command('progress', async ctx => {
   if (!ownerGate(ctx)) return
   if (!PROGRESS_CMD) {
@@ -898,10 +926,7 @@ bot.command('progress', async ctx => {
 })
 
 bot.callbackQuery('progress:stop', async ctx => {
-  if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-    await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-    return
-  }
+  if (!(await ownerCallback(ctx))) return
   const chatId = String(ctx.chat?.id ?? ctx.from.id)
   const stop = progressFollowers.get(chatId)
   if (stop) stop()
@@ -909,41 +934,101 @@ bot.callbackQuery('progress:stop', async ctx => {
   await ctx.answerCallbackQuery({ text: 'Stopped following.' }).catch(() => {})
 })
 
-// /model and /mode: pick from inline buttons, then hand the value to the
-// configured command. Callback data is `<kind>:<index>`.
+// Switchers: pick from inline buttons, then hand the value to the configured
+// command. Callback data is `<kind>:<index>`.
 const switchers = {
-  model: { cmd: MODEL_CMD, env: 'TELEGRAM_MODEL_CMD', choices: MODELS, prompt: 'Switch the session to:' },
-  mode: { cmd: MODE_CMD, env: 'TELEGRAM_MODE_CMD', choices: MODES, prompt: 'Switch the permission mode to:' },
+  model: { env: 'TELEGRAM_MODEL_CMD', choices: process.env.TELEGRAM_MODELS ?? 'opus=opus,sonnet=sonnet,haiku=haiku',
+    prompt: 'Switch the session to:', description: "Switch the session's model" },
+  mode: { env: 'TELEGRAM_MODE_CMD', choices: process.env.TELEGRAM_MODES ?? 'auto,acceptEdits,manual',
+    prompt: 'Switch the permission mode to:', description: 'Switch the permission mode' },
+  effort: { env: 'TELEGRAM_EFFORT_CMD', choices: process.env.TELEGRAM_EFFORTS ?? 'low,medium,high,xhigh,max',
+    prompt: 'Switch the effort level to:', description: 'Switch the effort level' },
 }
 
 for (const [kind, sw] of Object.entries(switchers)) {
+  const cmd = process.env[sw.env]
+  const choices = parseChoices(sw.choices)
+  if (cmd) sessionMenu.push({ command: kind, description: sw.description, help: `/${kind} — ${sw.description.toLowerCase()}` })
   bot.command(kind, async ctx => {
     if (!ownerGate(ctx)) return
-    if (!sw.cmd) {
+    if (!cmd) {
       await ctx.reply(`/${kind} is not configured (${sw.env}).`)
       return
     }
     const kb = new InlineKeyboard()
-    sw.choices.forEach((c, i) => kb.text(c.label, `${kind}:${i}`))
+    choices.forEach((c, i) => kb.text(c.label, `${kind}:${i}`))
     await ctx.reply(sw.prompt, { reply_markup: kb })
+  })
+  bot.callbackQuery(new RegExp(`^${kind}:(\\d+)$`), async ctx => {
+    if (!(await ownerCallback(ctx)) || !cmd) return
+    const choice = choices[Number(ctx.match[1])]
+    if (!choice) {
+      await ctx.answerCallbackQuery().catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery({ text: `Switching to ${choice.label}…` }).catch(() => {})
+    await ctx.editMessageText(`Switching to ${choice.label}…`).catch(() => {})
+    runDetached(cmd, [choice.value])
   })
 }
 
-bot.callbackQuery(/^(model|mode):(\d+)$/, async ctx => {
-  const sw = switchers[ctx.match[1] as keyof typeof switchers]
-  const access = loadAccess()
-  if (!access.allowFrom.includes(String(ctx.from.id)) || !sw.cmd) {
-    await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-    return
-  }
-  const choice = sw.choices[Number(ctx.match[2])]
-  if (!choice) {
+// Pickers: `<cmd> list` prints `value<TAB>label` lines; each becomes a button
+// row. Callback data is `pick:<name>:<action>:<value>`, so values are limited
+// to a safe charset that fits Telegram's 64-byte callback data.
+const PICK_VALUE = /^[A-Za-z0-9_.-]{1,40}$/
+const pickers = {
+  resume: { env: 'TELEGRAM_RESUME_CMD', description: 'Go back to an earlier conversation',
+    prompt: 'Resume which conversation?', empty: 'No earlier conversations found.' },
+  tasks: { env: 'TELEGRAM_TASKS_CMD', description: 'Side tasks: result or stop',
+    prompt: 'Side tasks (tap for the result):', empty: 'No side tasks running.' },
+}
+
+for (const [name, pk] of Object.entries(pickers)) {
+  const cmd = process.env[pk.env]
+  if (cmd) sessionMenu.push({ command: name, description: pk.description, help: `/${name} — ${pk.description.toLowerCase()}` })
+  bot.command(name, async ctx => {
+    if (!ownerGate(ctx)) return
+    if (!cmd) {
+      await ctx.reply(`/${name} is not configured (${pk.env}).`)
+      return
+    }
+    const { text, ok } = await runOutput(cmd, ['list'])
+    if (!ok) {
+      await ctx.reply(text)
+      return
+    }
+    const items = text.split('\n')
+      .map(l => l.split('\t'))
+      .filter(([value, label]) => label && PICK_VALUE.test(value))
+    if (items.length === 0) {
+      await ctx.reply(pk.empty)
+      return
+    }
+    const kb = new InlineKeyboard()
+    for (const [value, label] of items) {
+      if (name === 'tasks') kb.text(label, `pick:tasks:result:${value}`).text('Stop', `pick:tasks:stop:${value}`).row()
+      else kb.text(label, `pick:${name}:go:${value}`).row()
+    }
+    await ctx.reply(pk.prompt, { reply_markup: kb })
+  })
+}
+
+bot.callbackQuery(/^pick:(resume|tasks):(go|result|stop):([A-Za-z0-9_.-]{1,40})$/, async ctx => {
+  if (!(await ownerCallback(ctx))) return
+  const [, name, action, value] = ctx.match
+  const cmd = process.env[pickers[name as keyof typeof pickers].env]
+  if (!cmd) {
     await ctx.answerCallbackQuery().catch(() => {})
     return
   }
-  await ctx.answerCallbackQuery({ text: `Switching to ${choice.label}…` }).catch(() => {})
-  await ctx.editMessageText(`Switching to ${choice.label}…`).catch(() => {})
-  runDetached(sw.cmd, [choice.value])
+  if (name === 'resume') {
+    await ctx.answerCallbackQuery({ text: 'Resuming…' }).catch(() => {})
+    await ctx.editMessageText('Resuming that conversation…').catch(() => {})
+    runDetached(cmd, [value])
+    return
+  }
+  await ctx.answerCallbackQuery().catch(() => {})
+  await ctx.reply((await runOutput(cmd, [action, value])).text)
 })
 
 // Inline-button handler for permission requests. Callback data is
@@ -1230,12 +1315,7 @@ void (async () => {
               { command: 'start', description: 'Welcome and setup guide' },
               { command: 'help', description: 'What this bot can do' },
               { command: 'status', description: 'Check your pairing status' },
-              ...(CLEAR_CMD ? [{ command: 'clear', description: 'Start a fresh session' }] : []),
-              ...(BTW_CMD ? [{ command: 'btw', description: 'Run a side task in a separate session' }] : []),
-              ...(MODEL_CMD ? [{ command: 'model', description: "Switch the session's model" }] : []),
-              ...(MODE_CMD ? [{ command: 'mode', description: 'Switch the permission mode' }] : []),
-              ...(COMPACT_CMD ? [{ command: 'compact', description: 'Compact the conversation' }] : []),
-              ...(PROGRESS_CMD ? [{ command: 'progress', description: 'Follow what the session is doing, live' }] : []),
+              ...sessionMenu.map(({ command, description }) => ({ command, description })),
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})
