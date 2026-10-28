@@ -1,0 +1,72 @@
+name: Sync upstream
+
+# Merge new changes to the official Telegram plugin into this fork.
+# `upstream` holds a subtree split of external_plugins/telegram from
+# anthropics/claude-plugins-official; `main` is upstream plus the session
+# commands. On a merge conflict, open an issue instead of pushing.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Split upstream plugin history
+        run: |
+          git clone --filter=blob:none --no-checkout -q \
+            https://github.com/anthropics/claude-plugins-official.git "$RUNNER_TEMP/upstream"
+          git -C "$RUNNER_TEMP/upstream" subtree split -q \
+            --prefix=external_plugins/telegram origin/main -b telegram-split
+          git fetch -q "$RUNNER_TEMP/upstream" telegram-split
+          echo "UPSTREAM_SHA=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_ENV"
+
+      - name: Update upstream branch
+        run: |
+          git fetch -q origin upstream
+          if [ "$(git rev-parse origin/upstream)" = "$UPSTREAM_SHA" ]; then
+            echo "No upstream changes."
+            echo "CHANGED=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          git merge-base --is-ancestor origin/upstream "$UPSTREAM_SHA" || {
+            echo "::error::upstream history was rewritten; refusing to force-push"; exit 1; }
+          git push -q origin "$UPSTREAM_SHA:refs/heads/upstream"
+          echo "CHANGED=1" >> "$GITHUB_ENV"
+
+      - name: Merge into main
+        if: env.CHANGED == '1'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git merge --no-edit -m "Merge upstream telegram plugin" "$UPSTREAM_SHA"; then
+            git push -q origin HEAD:main
+          else
+            git merge --abort
+            echo "CONFLICT=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Report conflict
+        if: env.CONFLICT == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Upstream merge conflict"
+          if gh issue list --state open --search "in:title \"$title\"" --json number --jq 'length' | grep -qx 0; then
+            gh issue create --title "$title" --body "Merging upstream ${UPSTREAM_SHA} into main conflicts. The \`upstream\` branch is updated; merge it into \`main\` by hand."
+          fi
+          exit 1
