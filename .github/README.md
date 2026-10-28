@@ -102,6 +102,14 @@ Some notes from building a working set:
   Then wait until `bot.pid` in the state directory changes (the new poller has
   taken over), and only then stop the old session with `claude stop <id>`.
   If the new session fails to start, the old one keeps running.
+- **Authentication**: background sessions run under a supervisor daemon that
+  `claude --bg` starts on demand, and they inherit that daemon's environment,
+  not the environment of the script that asked for them. The daemon exits when
+  its last session closes, so the next `claude --bg` starts a fresh one from
+  whichever script happens to run it. If you sign in with a long-lived token
+  (`claude setup-token`, `CLAUDE_CODE_OAUTH_TOKEN`), set it in every script
+  that runs `claude --bg`. Otherwise new sessions answer
+  `Not logged in · Please run /login`.
 - **`--channels` is variadic**: put it before the other options. A prompt that
   comes right after it is parsed as a second channel, and the session exits
   before it starts.
