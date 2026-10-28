@@ -261,10 +261,12 @@ async function runRelay(): Promise<void> {
   let waiting: Update[] = []
   let waitTimer: ReturnType<typeof setTimeout> | null = null
 
+  // Allowlisted DM senders, as in server.ts (static mode not supported here).
   const owner = (id: number | undefined) => {
     if (id == null) return false
     try {
       const access = JSON.parse(readFileSync(join(STATE_DIR, 'access.json'), 'utf8'))
+      if (access.dmPolicy === 'disabled') return false
       return (access.allowFrom ?? []).includes(String(id))
     } catch {
       return false
@@ -401,7 +403,7 @@ async function runRelay(): Promise<void> {
     const q = u.callback_query
     if (!q?.data?.startsWith('relay:')) return false
     const answer = (text?: string) => api.answerCallbackQuery(q.id, text ? { text } : {}).catch(() => {})
-    if (!owner(q.from.id)) {
+    if (!owner(q.from.id) || (q.message && q.message.chat.type !== 'private')) {
       await answer('Not authorized.')
       return true
     }
@@ -497,7 +499,7 @@ async function runRelay(): Promise<void> {
       const pid = owners.get(`${m.chat.id}:${m.reply_to_message.message_id}`)
       const c = pid != null ? byPid(pid) : null
       if (c) {
-        if (c !== active) setActive(c)
+        if (c !== active && m.chat.type === 'private' && owner(m.from?.id)) setActive(c)
         deliver(c, u)
         return
       }
