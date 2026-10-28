@@ -111,6 +111,8 @@ use them. Each one runs an operator-supplied command, configured in
 | `/btw <task>` | `TELEGRAM_BTW_CMD` | `<cmd> <task>`: run a side task in a separate session |
 | `/model` | `TELEGRAM_MODEL_CMD` | `<cmd> <model>`, after picking from inline buttons |
 | `/mode` | `TELEGRAM_MODE_CMD` | `<cmd> <mode>`, after picking from inline buttons |
+| `/compact [instructions]` | `TELEGRAM_COMPACT_CMD` | `<cmd> [instructions]`: compact the conversation |
+| `/status` | `TELEGRAM_STATUS_CMD` | `<cmd>`; its output is appended to the pairing status |
 
 `TELEGRAM_MODELS` sets the `/model` buttons as `label=model,...`
 (default `opus=opus,sonnet=sonnet,haiku=haiku`).
@@ -123,5 +125,7 @@ the session that owns the bot process. A typical script starts the new session
 `--resume <session-id> --fork-session` plus `--model` or `--permission-mode`
 for `/model` and `/mode`), waits for
 its poller to take over `bot.pid` in the state dir, then stops the old session.
+Background sessions have no CLI input channel, so a `/compact` script can
+run `claude attach <id>` in a pseudo-terminal and type `/compact` there.
 A `/btw` session should run without this plugin (only one poller per bot token
 can run) and report back through the Bot API's `sendMessage`.

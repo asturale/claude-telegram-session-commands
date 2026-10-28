@@ -21,7 +21,7 @@ import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
-import { execFileSync, spawn } from 'child_process'
+import { execFile, execFileSync, spawn } from 'child_process'
 import { join, extname, sep } from 'path'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
@@ -709,7 +709,8 @@ bot.command('help', async ctx => {
     (CLEAR_CMD ? `\n/clear [prompt] — start a fresh session` : '') +
     (BTW_CMD ? `\n/btw <task> — run a side task in a separate session` : '') +
     (MODEL_CMD ? `\n/model — switch the session's model` : '') +
-    (MODE_CMD ? `\n/mode — switch the permission mode` : '')
+    (MODE_CMD ? `\n/mode — switch the permission mode` : '') +
+    (COMPACT_CMD ? `\n/compact [instructions] — compact the conversation` : '')
   )
 })
 
@@ -720,7 +721,15 @@ bot.command('status', async ctx => {
 
   if (access.allowFrom.includes(senderId)) {
     const name = ctx.from!.username ? `@${ctx.from!.username}` : senderId
-    await ctx.reply(`Paired as ${name}.`)
+    let extra = ''
+    if (STATUS_CMD) {
+      extra = await new Promise<string>(resolve => {
+        execFile(STATUS_CMD, [], { timeout: 30000, encoding: 'utf8' }, (err, stdout) => {
+          resolve(err && !stdout ? `\n\nStatus command failed: ${err.message}` : `\n\n${stdout.trim()}`)
+        })
+      })
+    }
+    await ctx.reply(`Paired as ${name}.${extra}`.slice(0, 4096))
     return
   }
 
@@ -747,6 +756,9 @@ bot.command('status', async ctx => {
 //                         permission mode
 //   TELEGRAM_MODES      — button list for /mode, `label=mode,...`
 //                         (default: auto, acceptEdits, manual)
+//   TELEGRAM_COMPACT_CMD — run as `<cmd> [instructions]`: compact the session
+//   TELEGRAM_STATUS_CMD — run as `<cmd>`; its stdout is appended to /status
+//                         for the owner (waited for, 30s timeout)
 // They are handled here rather than forwarded, so they still work while the
 // session is busy or stuck on a prompt. The scripts run detached: /clear and
 // /model typically replace the session that owns this server process.
@@ -754,6 +766,8 @@ const CLEAR_CMD = process.env.TELEGRAM_CLEAR_CMD
 const BTW_CMD = process.env.TELEGRAM_BTW_CMD
 const MODEL_CMD = process.env.TELEGRAM_MODEL_CMD
 const MODE_CMD = process.env.TELEGRAM_MODE_CMD
+const COMPACT_CMD = process.env.TELEGRAM_COMPACT_CMD
+const STATUS_CMD = process.env.TELEGRAM_STATUS_CMD
 
 function parseChoices(spec: string): { label: string; value: string }[] {
   return spec
@@ -806,6 +820,17 @@ bot.command('btw', async ctx => {
     return
   }
   runDetached(BTW_CMD, [task])
+})
+
+bot.command('compact', async ctx => {
+  if (!ownerGate(ctx)) return
+  if (!COMPACT_CMD) {
+    await ctx.reply('/compact is not configured (TELEGRAM_COMPACT_CMD).')
+    return
+  }
+  const instructions = String(ctx.match ?? '').trim()
+  await ctx.reply('Compacting the conversation…')
+  runDetached(COMPACT_CMD, instructions ? [instructions] : [])
 })
 
 // /model and /mode: pick from inline buttons, then hand the value to the
@@ -1133,6 +1158,7 @@ void (async () => {
               ...(BTW_CMD ? [{ command: 'btw', description: 'Run a side task in a separate session' }] : []),
               ...(MODEL_CMD ? [{ command: 'model', description: "Switch the session's model" }] : []),
               ...(MODE_CMD ? [{ command: 'mode', description: 'Switch the permission mode' }] : []),
+              ...(COMPACT_CMD ? [{ command: 'compact', description: 'Compact the conversation' }] : []),
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})
