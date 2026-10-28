@@ -767,7 +767,7 @@ bot.command('status', async ctx => {
 //   TELEGRAM_MODE_CMD   + TELEGRAM_MODES    /mode   (default auto, acceptEdits, manual)
 //   TELEGRAM_EFFORT_CMD + TELEGRAM_EFFORTS  /effort (default low … max)
 // Pickers — `<cmd> list` prints `value<TAB>label` lines, one button row each:
-//   (a `page-<n>` line is a paging button: `<cmd> list <n>`)
+//   (a `page-<n>` or `open-<n>` line is a button that runs `<cmd> list <n>`)
 //   TELEGRAM_RESUME_CMD  /resume: `<cmd> <value>` (detached) on tap
 //   TELEGRAM_TASKS_CMD   /tasks: `<cmd> result <value>` or `<cmd> stop <value>`,
 //                        stdout is the reply
@@ -983,7 +983,9 @@ for (const [kind, sw] of Object.entries(switchers)) {
 // row. Callback data is `pick:<name>:<action>:<value>`, so values are limited
 // to a safe charset that fits Telegram's 64-byte callback data. A line with
 // value `page-<n>` is a paging button instead: tapping it runs `<cmd> list <n>`
-// and replaces the buttons in place. Paging buttons share the last row.
+// and replaces the buttons in place. Paging buttons share the last row. A line
+// with value `open-<n>` does the same from a row of its own (/skill's groups).
+// <n> is any value, passed to `list` as is.
 const PICK_VALUE = /^[A-Za-z0-9_.:-]{1,40}$/
 const pickers = {
   resume: { env: 'TELEGRAM_RESUME_CMD', description: 'Go back to an earlier conversation',
@@ -1003,8 +1005,10 @@ function pickerKeyboard(name: string, text: string): InlineKeyboard | null {
   const kb = new InlineKeyboard()
   const pages: [string, string][] = []
   for (const [value, label] of items) {
-    const page = /^page-(\d{1,6})$/.exec(value)
+    const page = /^page-(.+)$/.exec(value)
+    const open = /^open-(.+)$/.exec(value)
     if (page) pages.push([label, page[1]])
+    else if (open) kb.text(label, `pick:${name}:page:${open[1]}`).row()
     else if (name === 'tasks') kb.text(label, `pick:tasks:result:${value}`).text('Stop', `pick:tasks:stop:${value}`).row()
     else if (name === 'skill') kb.text(label, `pick:skill:go:${value}`).text('ℹ️', `pick:skill:info:${value}`).row()
     else kb.text(label, `pick:${name}:go:${value}`).row()
