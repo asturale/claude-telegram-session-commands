@@ -94,7 +94,7 @@ replace the session that owns the bot process.
 
 ### Writing the scripts
 
-[`scripts/`](../scripts) has a complete, tested set: it runs Claude Code in the
+[`scripts/`](../scripts) has a complete set: it runs Claude Code in the
 background on a Linux machine, starts it at boot, and implements every command
 above. See [`scripts/README.md`](../scripts/README.md) to install it. To write
 your own, some notes from building that set:
