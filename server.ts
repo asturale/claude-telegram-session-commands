@@ -710,7 +710,8 @@ bot.command('help', async ctx => {
     (BTW_CMD ? `\n/btw <task> — run a side task in a separate session` : '') +
     (MODEL_CMD ? `\n/model — switch the session's model` : '') +
     (MODE_CMD ? `\n/mode — switch the permission mode` : '') +
-    (COMPACT_CMD ? `\n/compact [instructions] — compact the conversation` : '')
+    (COMPACT_CMD ? `\n/compact [instructions] — compact the conversation` : '') +
+    (PROGRESS_CMD ? `\n/progress — follow what the session is doing, live` : '')
   )
 })
 
@@ -759,6 +760,11 @@ bot.command('status', async ctx => {
 //   TELEGRAM_COMPACT_CMD — run as `<cmd> [instructions]`: compact the session
 //   TELEGRAM_STATUS_CMD — run as `<cmd>`; its stdout is appended to /status
 //                         for the owner (waited for, 30s timeout)
+//   TELEGRAM_PROGRESS_CMD — run as `<cmd>` every TELEGRAM_PROGRESS_INTERVAL
+//                         seconds (default 5) while /progress is followed;
+//                         stdout is the message text, exit 0 = still working,
+//                         any other exit = done (stop following). Following
+//                         ends after TELEGRAM_PROGRESS_MAX_MINUTES (default 15).
 // They are handled here rather than forwarded, so they still work while the
 // session is busy or stuck on a prompt. The scripts run detached: /clear and
 // /model typically replace the session that owns this server process.
@@ -768,6 +774,9 @@ const MODEL_CMD = process.env.TELEGRAM_MODEL_CMD
 const MODE_CMD = process.env.TELEGRAM_MODE_CMD
 const COMPACT_CMD = process.env.TELEGRAM_COMPACT_CMD
 const STATUS_CMD = process.env.TELEGRAM_STATUS_CMD
+const PROGRESS_CMD = process.env.TELEGRAM_PROGRESS_CMD
+const PROGRESS_INTERVAL_MS = Math.max(2, Number(process.env.TELEGRAM_PROGRESS_INTERVAL) || 5) * 1000
+const PROGRESS_MAX_MS = Math.max(1, Number(process.env.TELEGRAM_PROGRESS_MAX_MINUTES) || 15) * 60_000
 
 function parseChoices(spec: string): { label: string; value: string }[] {
   return spec
@@ -831,6 +840,73 @@ bot.command('compact', async ctx => {
   const instructions = String(ctx.match ?? '').trim()
   await ctx.reply('Compacting the conversation…')
   runDetached(COMPACT_CMD, instructions ? [instructions] : [])
+})
+
+// /progress: post the output of PROGRESS_CMD and keep editing that message
+// while the command reports the session as busy. One follower per chat.
+const progressFollowers = new Map<string, () => void>()
+
+function runProgress(): Promise<{ text: string; busy: boolean }> {
+  return new Promise(resolve => {
+    execFile(PROGRESS_CMD!, [], { timeout: 20000, encoding: 'utf8' }, (err, stdout) => {
+      const text = (stdout ?? '').trim() || (err ? `Progress command failed: ${err.message}` : '(no output)')
+      resolve({ text: text.slice(0, 3900), busy: !err })
+    })
+  })
+}
+
+bot.command('progress', async ctx => {
+  if (!ownerGate(ctx)) return
+  if (!PROGRESS_CMD) {
+    await ctx.reply('/progress is not configured (TELEGRAM_PROGRESS_CMD).')
+    return
+  }
+  const chatId = String(ctx.chat!.id)
+  progressFollowers.get(chatId)?.()
+  const stopKb = new InlineKeyboard().text('Stop following', 'progress:stop')
+  let { text: last, busy } = await runProgress()
+  const msg = await ctx.reply(last, busy ? { reply_markup: stopKb } : {})
+  if (!busy) return
+
+  const started = Date.now()
+  let stopped = false
+  let inFlight = false
+  const finish = (note: string) => {
+    if (stopped) return
+    stopped = true
+    clearInterval(timer)
+    progressFollowers.delete(chatId)
+    void bot.api.editMessageText(chatId, msg.message_id, `${last}\n\n${note}`).catch(() => {})
+  }
+  const timer = setInterval(async () => {
+    if (stopped || inFlight) return
+    if (Date.now() - started > PROGRESS_MAX_MS) return finish('(stopped following: time limit)')
+    inFlight = true
+    const p = await runProgress()
+    inFlight = false
+    if (stopped) return
+    if (!p.busy) {
+      last = p.text
+      return finish('(done)')
+    }
+    if (p.text !== last) {
+      last = p.text
+      await bot.api.editMessageText(chatId, msg.message_id, last, { reply_markup: stopKb }).catch(() => {})
+    }
+  }, PROGRESS_INTERVAL_MS)
+  progressFollowers.set(chatId, () => finish('(stopped following)'))
+})
+
+bot.callbackQuery('progress:stop', async ctx => {
+  if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+    await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+    return
+  }
+  const chatId = String(ctx.chat?.id ?? ctx.from.id)
+  const stop = progressFollowers.get(chatId)
+  if (stop) stop()
+  else await ctx.editMessageReplyMarkup().catch(() => {})
+  await ctx.answerCallbackQuery({ text: 'Stopped following.' }).catch(() => {})
 })
 
 // /model and /mode: pick from inline buttons, then hand the value to the
@@ -1159,6 +1235,7 @@ void (async () => {
               ...(MODEL_CMD ? [{ command: 'model', description: "Switch the session's model" }] : []),
               ...(MODE_CMD ? [{ command: 'mode', description: 'Switch the permission mode' }] : []),
               ...(COMPACT_CMD ? [{ command: 'compact', description: 'Compact the conversation' }] : []),
+              ...(PROGRESS_CMD ? [{ command: 'progress', description: 'Follow what the session is doing, live' }] : []),
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})

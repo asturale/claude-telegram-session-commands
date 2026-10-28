@@ -3,7 +3,8 @@
 A fork of the official [Telegram channel plugin](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram)
 for Claude Code. It adds bot commands that manage the Claude Code session
 itself from your phone: start a fresh session, run a side task, switch model or
-permission mode, compact the conversation and check status.
+permission mode, compact the conversation, check status and follow progress
+live.
 
 Everything else is the upstream plugin, unchanged. A daily GitHub Action merges
 new upstream changes into this repository (see [Staying in sync](#staying-in-sync)).
@@ -19,6 +20,7 @@ The upstream documentation is in [README.md](../README.md) and [ACCESS.md](../AC
 | `/mode` | Pick a permission mode from inline buttons | `TELEGRAM_MODE_CMD`, `TELEGRAM_MODES` |
 | `/compact [instructions]` | Compact the conversation | `TELEGRAM_COMPACT_CMD` |
 | `/status` | Pairing status, plus the output of your status script | `TELEGRAM_STATUS_CMD` |
+| `/progress` | One message that updates live while the session works, with a stop button | `TELEGRAM_PROGRESS_CMD` |
 
 The bot answers these commands itself instead of forwarding them to Claude.
 That means they work while the session is busy, or stuck waiting on a
@@ -43,6 +45,9 @@ TELEGRAM_MODE_CMD=/path/to/mode-script
 TELEGRAM_MODES=Auto=auto,Accept edits=acceptEdits,Manual=manual
 TELEGRAM_COMPACT_CMD=/path/to/compact-script
 TELEGRAM_STATUS_CMD=/path/to/status-script
+TELEGRAM_PROGRESS_CMD=/path/to/progress-script
+TELEGRAM_PROGRESS_INTERVAL=5        # seconds between updates
+TELEGRAM_PROGRESS_MAX_MINUTES=15    # stop following after this
 ```
 
 | Variable | Invoked as |
@@ -53,11 +58,12 @@ TELEGRAM_STATUS_CMD=/path/to/status-script
 | `TELEGRAM_MODE_CMD` | `<cmd> <permission-mode>` |
 | `TELEGRAM_COMPACT_CMD` | `<cmd> [instructions]` |
 | `TELEGRAM_STATUS_CMD` | `<cmd>`; stdout is appended to `/status` (30 s timeout) |
+| `TELEGRAM_PROGRESS_CMD` | `<cmd>`, repeatedly; stdout is the message, exit 0 = still busy, anything else = done |
 
 `TELEGRAM_MODELS` and `TELEGRAM_MODES` are `label=value` lists separated by
 commas. The defaults are `opus,sonnet,haiku` and `auto,acceptEdits,manual`.
 
-All commands except `/status` are spawned detached, because `/clear`, `/model`
+All commands except `/status` and `/progress` are spawned detached, because `/clear`, `/model`
 and `/mode` usually replace the session that owns the bot process.
 
 ### Writing the scripts
@@ -81,6 +87,10 @@ Some notes from building a working set:
   session with this plugin disabled
   (`--settings '{"enabledPlugins":{"telegram@claude-plugins-official":false}}'`)
   and have it report back through the Bot API's `sendMessage`.
+- **Progress**: the session transcript (`~/.claude/projects/<project>/<session-id>.jsonl`)
+  has everything you need. Take the last real user message, the `tool_use`
+  entries after it, and the latest assistant text. Read only the end of
+  the file, because the script runs every few seconds.
 - **Compacting**: background sessions have no CLI input. A script can run
   `claude attach <id>` in a pseudo-terminal, type `/compact` and Enter, and
   close the attach client. The session keeps running.
