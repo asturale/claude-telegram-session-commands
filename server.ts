@@ -771,7 +771,8 @@ bot.command('status', async ctx => {
 //   TELEGRAM_RESUME_CMD  /resume: `<cmd> <value>` (detached) on tap
 //   TELEGRAM_TASKS_CMD   /tasks: `<cmd> result <value>` or `<cmd> stop <value>`,
 //                        stdout is the reply
-//   TELEGRAM_SKILL_CMD   /skill: `<cmd> <value>` (detached) on tap;
+//   TELEGRAM_SKILL_CMD   /skill: `<cmd> <value>` (detached) on tap, ℹ️ button
+//                        replies with the stdout of `<cmd> info <value>`;
 //                        `/skill <name> [text]` runs `<cmd> <name> [text]` directly
 // Live:
 //   TELEGRAM_PROGRESS_CMD `<cmd>` every TELEGRAM_PROGRESS_INTERVAL seconds
@@ -1005,6 +1006,7 @@ function pickerKeyboard(name: string, text: string): InlineKeyboard | null {
     const page = /^page-(\d{1,6})$/.exec(value)
     if (page) pages.push([label, page[1]])
     else if (name === 'tasks') kb.text(label, `pick:tasks:result:${value}`).text('Stop', `pick:tasks:stop:${value}`).row()
+    else if (name === 'skill') kb.text(label, `pick:skill:go:${value}`).text('ℹ️', `pick:skill:info:${value}`).row()
     else kb.text(label, `pick:${name}:go:${value}`).row()
   }
   for (const [label, offset] of pages) kb.text(label, `pick:${name}:page:${offset}`)
@@ -1045,7 +1047,7 @@ for (const [name, pk] of Object.entries(pickers)) {
   })
 }
 
-bot.callbackQuery(/^pick:(resume|tasks|skill):(go|result|stop|page):([A-Za-z0-9_.:-]{1,40})$/, async ctx => {
+bot.callbackQuery(/^pick:(resume|tasks|skill):(go|result|stop|page|info):([A-Za-z0-9_.:-]{1,40})$/, async ctx => {
   if (!(await ownerCallback(ctx))) return
   const [, name, action, value] = ctx.match
   const cmd = process.env[pickers[name as keyof typeof pickers].env]
@@ -1065,6 +1067,12 @@ bot.callbackQuery(/^pick:(resume|tasks|skill):(go|result|stop|page):([A-Za-z0-9_
     await ctx.answerCallbackQuery({ text: 'Resuming…' }).catch(() => {})
     await ctx.editMessageText('Resuming that conversation…').catch(() => {})
     runDetached(cmd, [value])
+    return
+  }
+  if (name === 'skill' && action === 'info') {
+    // The picker stays open, so another skill can still be run or looked up.
+    await ctx.answerCallbackQuery().catch(() => {})
+    await ctx.reply((await runOutput(cmd, ['info', value])).text)
     return
   }
   if (name === 'skill') {

@@ -2,6 +2,7 @@
 """/skill (TELEGRAM_SKILL_CMD): run a skill in the Telegram session.
   claude-tg-skill list [n]       lines "<name>\\t<label>": skills you can invoke,
                                  from the n-th on, plus "page-<n>" lines to page through
+  claude-tg-skill info <name>    what the skill does (its description)
   claude-tg-skill <name> [text]  type "/<name> [text]" into the session
 
 Skills come from ~/.claude/skills, the working directory's .claude/skills and
@@ -53,12 +54,19 @@ def frontmatter(path):
         return out
     if not lines or lines[0].strip() != "---":
         return out
+    key = None
     for line in lines[1:]:
         if line.strip() == "---":
             break
         k, sep, v = line.partition(":")
         if sep and not line.startswith((" ", "\t")):
-            out[k.strip()] = v.strip().strip("\"'")
+            key, out[k.strip()] = k.strip(), v.strip().strip("\"'")
+            if out[key] in (">", "|", ">-", "|-"):  # block scalar: indented lines follow
+                out[key] = ""
+            else:
+                key = None
+        elif key and line.strip():
+            out[key] = (out[key] + " " + line.strip()).strip()
     return out
 
 
@@ -85,7 +93,7 @@ def skills():
         scan(Path(versions[-1]["installPath"]) / "skills", key.split("@")[0] + ":")
     for name in setting("CLAUDE_TG_SKILLS_EXTRA", "").split(","):
         if NAME.match(name.strip()):
-            found.setdefault(name.strip(), "")
+            found.setdefault(name.strip(), "Built into Claude Code.")
     return dict(sorted(found.items()))
 
 
@@ -96,7 +104,7 @@ def log(text):
 
 
 if len(sys.argv) < 2:
-    sys.exit("usage: claude-tg-skill list [n] | <name> [text]")
+    sys.exit("usage: claude-tg-skill list [n] | info <name> | <name> [text]")
 
 if sys.argv[1] == "list":
     try:
@@ -110,6 +118,15 @@ if sys.argv[1] == "list":
         print(f"page-{max(offset - SHOW, 0)}\t◂ Previous")
     if len(names) > offset + SHOW:
         print(f"page-{offset + SHOW}\tMore ▸")
+    sys.exit(0)
+
+if sys.argv[1] == "info":
+    name = sys.argv[2].lstrip("/") if len(sys.argv) > 2 else ""
+    found = skills()
+    if name not in found:
+        print(f"Unknown skill: {name}")
+        sys.exit(1)
+    print(f"/{name}\n\n{found[name] or 'No description.'}")
     sys.exit(0)
 
 # One line: a newline would press Enter halfway through.
