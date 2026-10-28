@@ -128,11 +128,61 @@ Some notes from building a working set:
   `retry-after`. Token totals per model can also be added up from the
   `usage` fields in the transcripts.
 
+## Multiple sessions
+
+Telegram lets only one process poll a bot token, so normally one Claude Code
+session at a time can be reached from Telegram. With `TELEGRAM_RELAY=1` in the
+`.env`, several sessions share the bot. [`relay.ts`](../relay.ts) is then the
+only process that polls. Each session's server connects to it over a unix
+socket in the state directory and starts it if it isn't running. The relay
+hands each update to one session. Sending is unchanged: every session calls the
+Bot API itself.
+
+| Command | What it does | Configured by |
+| --- | --- | --- |
+| `/sessions` | Open sessions as buttons: tap one to switch to it, ✕ to close it | `TELEGRAM_SESSION_INFO_CMD` (optional) |
+| `/new [prompt]` | Pick a model, then open an extra session next to the others | `TELEGRAM_NEW_CMD`, `TELEGRAM_MODELS` |
+| `/close` | Close the active session, after a confirmation | `TELEGRAM_CLOSE_CMD` |
+
+- Plain messages go to the active session. A swipe-reply goes to the session
+  that sent the message you reply to, and makes that session active. A button
+  tap goes to the session that sent the button.
+- With two or more sessions open, every message from a session starts with its
+  label, for example `[2·sonnet]`. A message from a session that isn't active
+  gets a "↩ Reply to 2·sonnet" button that makes it active.
+- Permission replies (`yes abcde`) go to all sessions. Only the one that asked
+  knows the code.
+- The other commands (`/stop`, `/model`, `/progress`, …) act on the active
+  session. Their scripts get `TELEGRAM_SESSION_PID`, the server pid of that
+  session. Use it instead of `bot.pid` to find the session. `bot.pid` holds the
+  active session's server pid, so scripts that don't know about the relay act on
+  the active session.
+- To replace a session in place (`/clear`, `/model`, …), write
+  `{"from": <TELEGRAM_SESSION_PID>}` to `relay-handover` in the state directory
+  before you start the new session. If it connects within two minutes, it takes
+  over the old session's number and becomes active. Waiting for `bot.pid` to
+  change still works.
+- `relay-state.json` in the state directory lists the open sessions with their
+  labels. A script that sends to Telegram on its own can use it to add the same
+  label.
+
+| Variable | Invoked as |
+| --- | --- |
+| `TELEGRAM_NEW_CMD` | `<cmd> <model> [prompt]`, with `TELEGRAM_SESSION_PID` set to the active session (to copy its settings), unset if none is open |
+| `TELEGRAM_CLOSE_CMD` | `<cmd>`, with `TELEGRAM_SESSION_PID` set to the session to close |
+| `TELEGRAM_SESSION_INFO_CMD` | `<cmd>`, per session; prints JSON with optional `model` and `status` (`busy`/`idle`), used for the labels and `/sessions` |
+
+The relay's commands work with no session open. It logs to `relay.log` in the
+state directory. A new `relay.ts` replaces the running relay when the first
+session with that version connects. Without `TELEGRAM_RELAY=1`, nothing
+changes.
+
 ## Installing
 
 Install the official plugin as usual
 (`claude plugin install telegram@claude-plugins-official`), then replace its
-`server.ts` with the one from this repository. The installed copy lives in
+`server.ts` with the one from this repository and add `relay.ts` next to it.
+The installed copy lives in
 `~/.claude/plugins/cache/claude-plugins-official/telegram/<version>/`. A plugin
 update overwrites it, so reapply it afterwards. One way is to apply
 `git diff upstream main -- server.ts` from this repository as a patch on each

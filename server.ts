@@ -23,6 +23,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, 
 import { homedir } from 'os'
 import { execFile, execFileSync, spawn } from 'child_process'
 import { join, extname, sep } from 'path'
+import { startRelayClient } from './relay.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'channels', 'telegram')
@@ -54,13 +55,15 @@ if (!TOKEN) {
 }
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 const PID_FILE = join(STATE_DIR, 'bot.pid')
+// Multi-session: get updates from relay.ts instead of polling (see there).
+const RELAY = process.env.TELEGRAM_RELAY === '1'
 
 // Telegram allows exactly one getUpdates consumer per token. If a previous
 // session crashed (SIGKILL, terminal closed) its server.ts grandchild can
 // survive as an orphan and hold the slot forever, so every new session sees
 // 409 Conflict. Kill any stale holder before we start polling.
 mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
-try {
+if (!RELAY) try {
   const stale = parseInt(readFileSync(PID_FILE, 'utf8'), 10)
   if (stale > 1 && stale !== process.pid) {
     process.kill(stale, 0)
@@ -75,7 +78,7 @@ try {
     }
   }
 } catch {}
-writeFileSync(PID_FILE, String(process.pid))
+if (!RELAY) writeFileSync(PID_FILE, String(process.pid))
 
 // Last-resort safety net — without these the process dies silently on any
 // unhandled promise rejection. With them it logs and keeps serving tools.
@@ -1302,7 +1305,13 @@ bot.catch(err => {
 // returned, and polling stopped permanently while the process stayed alive
 // (MCP stdin keeps it running). Outbound tools kept working but the bot was
 // deaf to inbound messages until a full restart.
-void (async () => {
+if (RELAY) startRelayClient({
+  bot,
+  menu: sessionMenu,
+  onReady: username => { botUsername = username },
+  isShuttingDown: () => shuttingDown,
+})
+else void (async () => {
   for (let attempt = 1; ; attempt++) {
     try {
       await bot.start({
