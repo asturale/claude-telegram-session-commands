@@ -76,6 +76,7 @@ For a machine nobody logs in to, use a long-lived token: run
 | `claude-tg-clear`, `-model`, `-mode`, `-effort`, `-reload`, `-new`, `-close` | the commands above | One-line wrappers around `claude-tg-session` |
 | `claude-tg-current` | most scripts | Finds the session a command is about, prints JSON |
 | `claude-tg-session-info` | `/sessions` | Model and status per session for the relay |
+| `claude-tg-pin` | relay, on every switch | Pins the active session in `~/.claude/jobs/pins.json` and unpins the one it pinned before, so the daemon doesn't retire the session you talk to after an idle hour; the others can be retired and come back with `/resume` |
 | `claude-tg-btw` | `/btw` | Side session without the plugin; reports through `tg-send` |
 | `claude-tg-remember` | `/remember` | Short side session that saves a note in Claude's memory |
 | `claude-tg-tasks` | `/tasks` | Lists, shows or stops the side sessions |
