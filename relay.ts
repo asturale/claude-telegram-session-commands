@@ -35,6 +35,9 @@
  * session they concern (for /new: the active one, to copy settings from).
  * TELEGRAM_SESSION_INFO_CMD, run the same way, prints JSON with optional
  * "model" and "status" ("busy"/"idle") for labels and the session list.
+ * TELEGRAM_PIN_CMD runs whenever the active session changes, with no
+ * arguments for the new active session or `--none` when none is left: for
+ * pinning it, so the daemon does not retire it while idle.
  * Sessions spawn their own scripts with TELEGRAM_SESSION_PID set to their own
  * server.ts pid, so existing session commands act on the session that ran them.
  *
@@ -242,6 +245,9 @@ async function runRelay(): Promise<void> {
   const NEW_CMD = process.env.TELEGRAM_NEW_CMD
   const CLOSE_CMD = process.env.TELEGRAM_CLOSE_CMD
   const INFO_CMD = process.env.TELEGRAM_SESSION_INFO_CMD
+  const PIN_CMD = process.env.TELEGRAM_PIN_CMD
+  let pinned: number | null | undefined // pid last handed to PIN_CMD
+  let pinning = Promise.resolve('')
   const MODELS = (process.env.TELEGRAM_MODELS ?? 'opus=opus,sonnet=sonnet,haiku=haiku')
     .split(',').map(e => e.trim()).filter(Boolean)
     .map(e => {
@@ -348,6 +354,12 @@ async function runRelay(): Promise<void> {
       } catch {}
     }
     pushState()
+    // One at a time, in order: each run unpins what the previous one pinned.
+    const pid = c?.pid ?? null
+    if (PIN_CMD && pid !== pinned) {
+      pinned = pid
+      pinning = pinning.then(() => runWith(PIN_CMD, pid ? [] : ['--none'], pid ?? undefined, false))
+    }
   }
 
   const runWith = (cmd: string, args: string[], pid: number | undefined, detached: boolean): Promise<string> => {

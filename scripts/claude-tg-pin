@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Pin the active Telegram session (TELEGRAM_PIN_CMD), so the daemon keeps it.
+
+The Claude Code daemon retires background sessions that are done and have been
+idle for an hour; pinned sessions (`claude agents`, ~/.claude/jobs/pins.json)
+are kept. The relay runs this whenever the active session changes:
+  claude-tg-pin          pin the session of TELEGRAM_SESSION_PID (else bot.pid)
+                         and unpin the one pinned before
+  claude-tg-pin --none   only unpin the one pinned before
+Only the session this script pinned is unpinned, never pins you set yourself.
+The other sessions can be retired; /resume brings them back.
+
+pins.json is a JSON array of session ids. Writes take the same lock the daemon
+takes (the directory pins.json.lock) and replace the file atomically.
+"""
+import json, os, subprocess, sys, time
+from datetime import datetime
+from pathlib import Path
+
+HOME = Path.home()
+here = Path(__file__).resolve().parent
+os.environ["PATH"] = f"{here}:{HOME}/.local/bin:" + os.environ.get("PATH", "")
+PINS = HOME / ".claude/jobs/pins.json"
+LOCK = PINS.with_name("pins.json.lock")
+STALE = 10  # seconds; the daemon treats its lock as stale after 5
+MINE = HOME / ".local/state/claude-tg/pinned"  # the session id this script pinned
+LOG = HOME / ".local/state/claude-tg/session.log"
+
+
+def log(text):
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOG, "a") as fh:
+        fh.write(f"=== {datetime.now().isoformat(timespec='seconds')} pin {text}\n")
+
+
+def lock():
+    for _ in range(50):
+        try:
+            LOCK.mkdir()
+            return True
+        except FileExistsError:
+            try:
+                if time.time() - LOCK.stat().st_mtime > STALE:
+                    LOCK.rmdir()
+                    continue
+            except OSError:
+                continue
+            time.sleep(0.1)
+    return False
+
+
+def update(add, remove):
+    if not lock():
+        log("pins.json is locked, skipped")
+        return False
+    try:
+        try:
+            pins = json.loads(PINS.read_text())
+            pins = [p for p in pins if isinstance(p, str)] if isinstance(pins, list) else []
+        except (OSError, ValueError):
+            pins = []
+        new = [p for p in pins if p != remove]
+        if add and add not in new:
+            new.append(add)
+        if new != pins:
+            tmp = PINS.with_name(f".pins.json.{os.getpid()}")
+            tmp.write_text(json.dumps(new, indent=2))
+            os.replace(tmp, PINS)
+        return True
+    finally:
+        LOCK.rmdir()
+
+
+try:
+    before = MINE.read_text().strip()
+except OSError:
+    before = ""
+now = ""
+if "--none" not in sys.argv[1:]:
+    cur = json.loads(subprocess.run(["claude-tg-current"], capture_output=True, text=True,
+                                    timeout=30).stdout or "{}")
+    now = cur.get("id", "")
+    if not now:
+        log("no background session found, nothing pinned")
+if now == before:
+    sys.exit(0)
+if update(now, before):
+    MINE.parent.mkdir(parents=True, exist_ok=True)
+    MINE.write_text(now)
+    log(f"pinned {now or '-'}, unpinned {before or '-'}")
