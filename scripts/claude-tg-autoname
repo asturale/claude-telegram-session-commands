@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# TELEGRAM_AUTONAME_CMD <session-id>: prints a short name for the session, see claude-tg-resume.
+exec "$(dirname "$(readlink -f "$0")")/claude-tg-resume" name "$@"
