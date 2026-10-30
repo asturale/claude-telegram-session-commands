@@ -479,6 +479,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             enum: ['text', 'markdownv2'],
             description: "Rendering mode. 'markdownv2' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per MarkdownV2 rules. Default: 'text' (plain, no escaping needed).",
           },
+          buttons: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Optional answer buttons under the (last) text message, e.g. ["Yes", "No"]. A tap arrives as an inbound message whose text is the button label, with button_reply in meta; the buttons are then replaced by the choice. Max 8, labels up to 40 chars.',
+          },
         },
         required: ['chat_id', 'text'],
       },
@@ -539,6 +544,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const files = (args.files as string[] | undefined) ?? []
         const format = (args.format as string | undefined) ?? 'text'
         const parseMode = format === 'markdownv2' ? 'MarkdownV2' as const : undefined
+        const buttons = (args.buttons as string[] | undefined) ?? []
+        if (buttons.length > 8 || buttons.some(b => !b.trim() || b.length > 40)) {
+          throw new Error('buttons: at most 8 non-empty labels of up to 40 chars')
+        }
 
         assertAllowedChat(chat_id)
 
@@ -563,11 +572,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               reply_to != null &&
               replyMode !== 'off' &&
               (replyMode === 'all' || i === 0)
+            const withButtons = buttons.length > 0 && i === chunks.length - 1
             const sent = await bot.api.sendMessage(chat_id, chunks[i], {
               ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
               ...(parseMode ? { parse_mode: parseMode } : {}),
+              ...(withButtons ? { reply_markup: answerKeyboard(buttons) } : {}),
             })
             sentIds.push(sent.message_id)
+            if (withButtons) rememberAnswers(chat_id, sent.message_id, buttons)
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
@@ -1089,6 +1101,134 @@ bot.callbackQuery(/^pick:(resume|tasks|skill):(go|result|stop|page|info):([A-Za-
   await ctx.reply((await runOutput(cmd, [action, value])).text)
 })
 
+// Answer buttons (the reply tool's `buttons`) and voice transcription.
+//
+// With TELEGRAM_TRANSCRIBE_CMD set, a voice message is transcribed by
+// `<cmd> <audio file>` (transcript on stdout, TELEGRAM_TRANSCRIBE_TIMEOUT
+// seconds, default 300) and shown back with Send/Discard buttons. Only Send
+// passes the transcript on, as if it was typed, so a misheard word ("on" heard
+// as "off") never turns into an action. When the command fails or prints
+// nothing, the voice message is passed on as it was.
+const TRANSCRIBE_CMD = process.env.TELEGRAM_TRANSCRIBE_CMD
+const TRANSCRIBE_TIMEOUT = (Number(process.env.TELEGRAM_TRANSCRIBE_TIMEOUT) || 300) * 1000
+
+type Inbound = { content: string; meta: Record<string, string> }
+// Keyed by `${chat}:${message_id}` of the message with the buttons.
+const pendingVoice = new Map<string, Inbound>()
+const answerLabels = new Map<string, string[]>()
+
+function keep<T>(map: Map<string, T>, key: string, value: T): void {
+  map.set(key, value)
+  if (map.size > 200) map.delete(map.keys().next().value!)
+}
+
+function deliver(inbound: Inbound): void {
+  mcp.notification({ method: 'notifications/claude/channel', params: inbound }).catch(err => {
+    process.stderr.write(`telegram channel: failed to deliver inbound to Claude: ${err}\n`)
+  })
+}
+
+function answerKeyboard(labels: string[]): InlineKeyboard {
+  const kb = new InlineKeyboard()
+  labels.forEach((label, i) => {
+    kb.text(label, `answer:${i}`)
+    if (labels.length > 3) kb.row()
+  })
+  return kb
+}
+
+function rememberAnswers(chat_id: string, message_id: number, labels: string[]): void {
+  keep(answerLabels, `${chat_id}:${message_id}`, labels)
+}
+
+async function downloadToInbox(file_id: string): Promise<string> {
+  const file = await bot.api.getFile(file_id)
+  if (!file.file_path) throw new Error('Telegram returned no file_path')
+  const res = await fetch(`https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`)
+  if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`)
+  const ext = (file.file_path.split('.').pop() ?? '').replace(/[^a-zA-Z0-9]/g, '') || 'bin'
+  const uniqueId = (file.file_unique_id ?? '').replace(/[^a-zA-Z0-9_-]/g, '') || 'dl'
+  const path = join(INBOX_DIR, `${Date.now()}-${uniqueId}.${ext}`)
+  mkdirSync(INBOX_DIR, { recursive: true })
+  writeFileSync(path, Buffer.from(await res.arrayBuffer()))
+  return path
+}
+
+// Transcribe a voice message and ask whether to send it on. Resolves false
+// when there is no transcript to show, so the caller passes the voice on.
+async function offerTranscript(
+  chat_id: string, msgId: number | undefined, file_id: string, caption: string | undefined, inbound: Inbound,
+): Promise<boolean> {
+  const typing = setInterval(() => void bot.api.sendChatAction(chat_id, 'typing').catch(() => {}), 4500)
+  try {
+    const path = await downloadToInbox(file_id)
+    const transcript = await new Promise<string>(resolve => {
+      execFile(TRANSCRIBE_CMD!, [path], { timeout: TRANSCRIBE_TIMEOUT, encoding: 'utf8' }, (err, stdout) => {
+        if (err) process.stderr.write(`telegram channel: transcription failed: ${err}\n`)
+        resolve(err ? '' : (stdout ?? '').trim())
+      })
+    })
+    if (!transcript) return false
+    const shown = transcript.length > 3500 ? `${transcript.slice(0, 3500)}…` : transcript
+    const sent = await bot.api.sendMessage(chat_id, `🎙 ${shown}`, {
+      ...(msgId != null ? { reply_parameters: { message_id: msgId } } : {}),
+      reply_markup: new InlineKeyboard().text('✅ Send', 'voice:yes').text('❌ Discard', 'voice:no'),
+    })
+    keep(pendingVoice, `${chat_id}:${sent.message_id}`, {
+      content: caption ? `${caption}\n\n${transcript}` : transcript,
+      meta: { ...inbound.meta, voice_transcript: 'confirmed' },
+    })
+    return true
+  } catch (err) {
+    process.stderr.write(`telegram channel: voice transcription failed: ${err}\n`)
+    return false
+  } finally {
+    clearInterval(typing)
+  }
+}
+
+bot.callbackQuery(/^(answer:(\d)|voice:(yes|no))$/, async ctx => {
+  if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+    await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+    return
+  }
+  const msg = ctx.callbackQuery.message
+  const key = msg ? `${msg.chat.id}:${msg.message_id}` : ''
+  const choice = ctx.match[3]
+  const label = choice ? undefined : answerLabels.get(key)?.[Number(ctx.match[2])]
+  const voice = choice ? pendingVoice.get(key) : undefined
+  if (!msg || (choice ? !voice : label == null)) {
+    await ctx.answerCallbackQuery({ text: 'This question has expired.' }).catch(() => {})
+    await ctx.editMessageReplyMarkup().catch(() => {})
+    return
+  }
+  answerLabels.delete(key)
+  pendingVoice.delete(key)
+  await ctx.answerCallbackQuery().catch(() => {})
+  const outcome = choice === 'yes' ? '✅ Sent' : choice === 'no' ? '❌ Discarded. Type it, or record it again.' : `→ ${label}`
+  // Show the choice in place of the buttons, so it can't be answered twice.
+  if ('text' in msg && msg.text) {
+    await ctx.editMessageText(`${msg.text}\n\n${outcome}`, { entities: msg.entities }).catch(() => {})
+  } else {
+    await ctx.editMessageReplyMarkup().catch(() => {})
+  }
+  if (voice) {
+    if (choice === 'yes') deliver(voice)
+    return
+  }
+  deliver({
+    content: label!,
+    meta: {
+      chat_id: String(msg.chat.id),
+      message_id: String(msg.message_id),
+      user: ctx.from.username ?? String(ctx.from.id),
+      user_id: String(ctx.from.id),
+      ts: new Date().toISOString(),
+      button_reply: 'true',
+    },
+  })
+})
+
 // Inline-button handler for permission requests. Callback data is
 // `perm:allow:<id>`, `perm:deny:<id>`, or `perm:more:<id>`.
 // Security mirrors the text-reply path: allowFrom must contain the sender.
@@ -1324,9 +1464,7 @@ async function handleInbound(
 
   // image_path goes in meta only — an in-content "[image attached — read: PATH]"
   // annotation is forgeable by any allowlisted sender typing that string.
-  mcp.notification({
-    method: 'notifications/claude/channel',
-    params: {
+  const inbound: Inbound = {
       content: text,
       meta: {
         chat_id,
@@ -1343,10 +1481,14 @@ async function handleInbound(
           ...(attachment.name ? { attachment_name: attachment.name } : {}),
         } : {}),
       },
-    },
-  }).catch(err => {
-    process.stderr.write(`telegram channel: failed to deliver inbound to Claude: ${err}\n`)
-  })
+  }
+  // Transcribing takes a while: don't hold up the messages that follow.
+  if (TRANSCRIBE_CMD && attachment?.kind === 'voice') {
+    void offerTranscript(chat_id, msgId, attachment.file_id, ctx.message?.caption, inbound)
+      .then(offered => { if (!offered) deliver(inbound) })
+    return
+  }
+  deliver(inbound)
 }
 
 // Without this, any throw in a message handler stops polling permanently
