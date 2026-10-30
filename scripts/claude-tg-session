@@ -71,7 +71,7 @@ case "$mode" in
     [ -z "$1" ] && { tg-send "No model given."; exit 1; }
     model="$1"; shift
     extra=()
-    prompt="Extra session opened via /new in Telegram, next to the existing ones. Send the user one short message with the Telegram reply tool saying this session is ready (and on which model)."
+    prompt="Extra session opened via /new in Telegram, next to the existing ones. The relay has already told the user it is ready: send nothing, just wait for their first message."
     [ -n "$*" ] && prompt="Extra session opened via /new in Telegram, next to the existing ones, with this request from the user: $*"
     ;;
   close)
