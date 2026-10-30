@@ -35,9 +35,12 @@
  * session they concern (for /new: the active one, to copy settings from).
  * TELEGRAM_SESSION_INFO_CMD, run the same way, prints JSON with optional
  * "model" and "status" ("busy"/"idle") for labels and the session list.
- * TELEGRAM_PIN_CMD runs whenever the active session changes, with no
- * arguments for the new active session or `--none` when none is left: for
- * pinning it, so the daemon does not retire it while idle.
+ * TELEGRAM_PIN_CMD runs whenever the set of sessions changes, as
+ * `--all <server.ts pid>…` (or `--none` when none is left): for pinning every
+ * open session, so the daemon does not retire one while idle. A session that
+ * goes away keeps its pin for a grace period, and the "closed" notice waits as
+ * long: a session that reconnects in time (the daemon restarting after a
+ * Claude Code update) is not reported.
  * Sessions spawn their own scripts with TELEGRAM_SESSION_PID set to their own
  * server.ts pid, so existing session commands act on the session that ran them.
  *
@@ -246,8 +249,11 @@ async function runRelay(): Promise<void> {
   const CLOSE_CMD = process.env.TELEGRAM_CLOSE_CMD
   const INFO_CMD = process.env.TELEGRAM_SESSION_INFO_CMD
   const PIN_CMD = process.env.TELEGRAM_PIN_CMD
-  let pinned: number | null | undefined // pid last handed to PIN_CMD
+  let pinned = '' // pids last handed to PIN_CMD
+  let pinTimer: ReturnType<typeof setTimeout> | null = null
   let pinning = Promise.resolve('')
+  const GRACE_MS = 15_000 // a disconnected session may come back within this
+  const gone = new Map<string, { timer: ReturnType<typeof setTimeout>, slot: number }>() // by sessionId
   const MODELS = (process.env.TELEGRAM_MODELS ?? 'opus=opus,sonnet=sonnet,haiku=haiku')
     .split(',').map(e => e.trim()).filter(Boolean)
     .map(e => {
@@ -354,12 +360,20 @@ async function runRelay(): Promise<void> {
       } catch {}
     }
     pushState()
-    // One at a time, in order: each run unpins what the previous one pinned.
-    const pid = c?.pid ?? null
-    if (PIN_CMD && pid !== pinned) {
-      pinned = pid
-      pinning = pinning.then(() => runWith(PIN_CMD, pid ? [] : ['--none'], pid ?? undefined, false))
-    }
+  }
+
+  // Pin every open session; after `delay` ms, so one that is only reconnecting keeps its pin.
+  const syncPins = (delay = 0) => {
+    if (!PIN_CMD) return
+    if (pinTimer) clearTimeout(pinTimer)
+    pinTimer = setTimeout(() => {
+      pinTimer = null
+      const pids = clients.map(c => String(c.pid)).sort()
+      if (pids.join(' ') === pinned) return
+      pinned = pids.join(' ')
+      // One at a time, in order: each run unpins what the previous one pinned.
+      pinning = pinning.then(() => runWith(PIN_CMD, pids.length ? ['--all', ...pids] : ['--none'], undefined, false))
+    }, delay)
   }
 
   const runWith = (cmd: string, args: string[], pid: number | undefined, detached: boolean): Promise<string> => {
@@ -641,10 +655,16 @@ async function runRelay(): Promise<void> {
         if (inherited) {
           inherited.replaced = true
           slot = inherited.slot
-        } else {
-          for (slot = 1; clients.some(c => c.slot === slot); slot++);
         }
         const sessionId = String(msg.sessionId ?? '')
+        const back = sessionId ? gone.get(sessionId) : undefined
+        if (back) {
+          // Back within the grace period: no "closed" notice, same number if free.
+          clearTimeout(back.timer)
+          gone.delete(sessionId)
+          if (!inherited && !clients.some(c => c.slot === back.slot)) slot = back.slot
+        }
+        if (!slot) for (slot = 1; clients.some(c => c.slot === slot); slot++);
         client = {
           sock, pid: Number(msg.pid), slot, sessionId,
           name: inherited?.name || (sessionId && loadNames()[sessionId]) || '',
@@ -653,8 +673,9 @@ async function runRelay(): Promise<void> {
         clients.push(client)
         // A fork (/model, /clear …) gets a new conversation id: keep the name.
         if (inherited?.name) saveName(client)
-        log(`session ${slot} connected (pid ${client.pid}${inherited ? `, replaces ${inherited.pid}` : ''})`)
+        log(`session ${slot} connected (pid ${client.pid}${inherited ? `, replaces ${inherited.pid}` : ''}${back ? ', reconnected' : ''})`)
         setActive(client)
+        syncPins()
         flushWaiting()
         const c = client
         for (const ms of [0, 5000, 20000, 60000]) setTimeout(() => void refresh(c), ms)
@@ -676,6 +697,7 @@ async function runRelay(): Promise<void> {
       } else {
         pushState()
       }
+      syncPins(c.closing ? 0 : GRACE_MS)
       if (c.replaced) return
       const autoNew = c.closing && !active && AUTO_NEW && !!NEW_CMD && !!DEFAULT_MODEL &&
         Date.now() - lastAutoNew > AUTO_NEW_MS
@@ -686,10 +708,14 @@ async function runRelay(): Promise<void> {
         void runWith(NEW_CMD!, [DEFAULT_MODEL], undefined, true)
         return
       }
-      notify(
+      const tell = () => notify(
         `Session ${label(c)} closed. ` +
         (active ? `Now talking to ${label(active)}.` : 'No sessions open; start one with /new.'),
       )
+      if (c.closing || !c.sessionId) return tell()
+      const id = c.sessionId
+      if (gone.has(id)) clearTimeout(gone.get(id)!.timer)
+      gone.set(id, { slot: c.slot, timer: setTimeout(() => { gone.delete(id); tell() }, GRACE_MS) })
     })
   })
   server.on('error', err => {
