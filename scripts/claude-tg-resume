@@ -414,10 +414,14 @@ if sys.argv[1].startswith("cloud-"):
     auto = AUTO_TITLE.match(title)
     if auto and load(TITLES, {}).get(sid, {}).get("title"):
         title = f"{auto.group(1)}: {load(TITLES, {})[sid]['title']}"
+    title = shorten(re.sub(r"[\s\"'`$\\]+", " ", title).strip(), 80)
+    os.umask(0o077)  # the copy may hold private data
     CLOUD_DIR.mkdir(parents=True, exist_ok=True)
+    CLOUD_DIR.chmod(0o700)
     f = CLOUD_DIR / f"{sid}.md"
     f.write_text(f"# {title}\n\nclaude.ai session {sid} ({s.get('environment_kind', '')}, "
                  f"last updated {s.get('updated_at', '')[:16]})\nhttps://claude.ai/code/{sid}\n\n{text}\n")
+    f.chmod(0o600)
     os.execvp("claude-tg-session", ["claude-tg-session", "import", str(f), title])
 
 if sys.argv[1] != "list":
