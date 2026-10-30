@@ -86,7 +86,7 @@ For a machine nobody logs in to, use a long-lived token: run
 | `claude-tg-progress` | `/progress` | Request, steps and latest text from the session transcript |
 | `claude-tg-status` | `/status` | Model, mode, context size and side tasks |
 | `claude-tg-usage` | `/usage` | Plan limits (cached) and today's token use |
-| `claude-tg-resume` | `/resume` | Open sessions and recent conversations as buttons, labelled with a short topic summary; a tap switches to or forks one |
+| `claude-tg-resume` | `/resume` | Open sessions and recent conversations as buttons, labelled with a short topic summary; a tap switches to or forks one. "☁ claude.ai sessions" lists the claude.ai sessions that are not archived (cloud and Remote Control, also from other computers); a tap copies that conversation to `~/.local/state/claude-tg/cloud/` and continues it in a new session. Needs a full `claude auth login` (a `setup-token` token cannot read sessions) |
 | `claude-tg-recap` | `/recap`, 📝 in `/sessions` | A few lines on where a session stands: topic, done, open or waiting for you (`claude-tg-resume recap`; model `CLAUDE_TG_RECAP_MODEL`, default the summaries' model) |
 | `claude-tg-autoname` | relay | A one- or two-word name for a session once its topic is clear (`claude-tg-resume name`, same model as the summaries) |
 | `claude-tg-transcribe` | voice messages | Transcript through whisper.cpp, retried in your language if whisper guessed another, then cleaned up by a small model |

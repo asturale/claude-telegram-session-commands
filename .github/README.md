@@ -18,7 +18,7 @@ The upstream documentation is in [README.md](../README.md) and [ACCESS.md](../AC
 | `/clear [prompt]` | Start a fresh session, optionally with a first prompt | `TELEGRAM_CLEAR_CMD` |
 | `/stop` | Interrupt the current turn (like Esc) | `TELEGRAM_STOP_CMD` |
 | `/reload` | Restart the session, same conversation (reloads MCP servers and settings) | `TELEGRAM_RELOAD_CMD` |
-| `/resume` | Buttons with recent conversations; tap one to continue it | `TELEGRAM_RESUME_CMD` |
+| `/resume` | Buttons with recent conversations; tap one to continue it. The bundled script adds a submenu with your claude.ai sessions (needs a full `claude auth login`) | `TELEGRAM_RESUME_CMD` |
 | `/model` | Pick a model from inline buttons; the conversation continues on it | `TELEGRAM_MODEL_CMD`, `TELEGRAM_MODELS` |
 | `/mode` | Pick a permission mode from inline buttons | `TELEGRAM_MODE_CMD`, `TELEGRAM_MODES` |
 | `/effort` | Pick an effort level from inline buttons | `TELEGRAM_EFFORT_CMD`, `TELEGRAM_EFFORTS` |
