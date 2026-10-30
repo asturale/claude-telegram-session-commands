@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# TELEGRAM_RECAP_CMD <session-id>: a few lines on where the session stands, see claude-tg-resume.
+exec "$(dirname "$(readlink -f "$0")")/claude-tg-resume" recap "$@"

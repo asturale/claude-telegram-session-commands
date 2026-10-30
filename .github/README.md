@@ -182,10 +182,11 @@ Bot API itself.
 | `/new [#name] [prompt]` | Open an extra session next to the others, on `TELEGRAM_DEFAULT_MODEL` (or the first `TELEGRAM_MODELS` entry); `#mail` names it right away; with `TELEGRAM_NEW_MODEL_MENU=1`, pick a model first | `TELEGRAM_NEW_CMD`, `TELEGRAM_MODELS` |
 | `/close` | Close the active session, after a confirmation | `TELEGRAM_CLOSE_CMD` |
 | `/name [name]` | Name the active session, so its label reads `2·mail` instead of `2·sonnet`; no name goes back to the model | — |
+| `/recap [n\|all]` | A few lines on where the active session (session n, or every session) stands; also 📝 in `/sessions`. Run by the relay: nothing switches and a busy session isn't disturbed | `TELEGRAM_RECAP_CMD` |
 | `/login` | Sign Claude Code in again from the chat: the relay runs the login command in a pseudo-terminal, sends you its sign-in link and types in the code you send back as a reply. Works while every session is stuck on `/login` | `TELEGRAM_LOGIN_CMD` (for example `claude auth login`) |
 
 - The bot menu lists the most used commands first: `/sessions`, `/new`,
-  `/progress`, `/stop`, `/btw`, then managing the session, settings,
+  `/progress`, `/recap`, `/stop`, `/btw`, then managing the session, settings,
   information, and `/login`, `/help`, `/start` last. `TELEGRAM_MENU_ORDER`
   (comma-separated) sets your own order; commands it leaves out follow.
 - Plain messages go to the active session. A swipe-reply goes to the session
@@ -240,6 +241,7 @@ Bot API itself.
 | `TELEGRAM_CLOSE_CMD` | `<cmd>`, with `TELEGRAM_SESSION_PID` set to the session to close |
 | `TELEGRAM_SESSION_INFO_CMD` | `<cmd>`, per session; prints JSON with optional `model` and `status` (`busy`/`idle`), used for the labels and `/sessions` |
 | `TELEGRAM_AUTONAME_CMD` | `<cmd> <session id>`, per unnamed session; prints a short name or nothing |
+| `TELEGRAM_RECAP_CMD` | `<cmd> <session id>`, with `TELEGRAM_SESSION_PID` set; prints the recap, nothing if there is none |
 | `TELEGRAM_LOGIN_CMD` | Run through a shell in a pseudo-terminal (`script`); the first URL it prints is sent with a reply prompt, the reply is typed in, exit 0 = signed in |
 
 The relay's commands work with no session open. It logs to `relay.log` in the
