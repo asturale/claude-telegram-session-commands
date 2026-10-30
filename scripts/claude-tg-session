@@ -8,6 +8,8 @@
 #   claude-tg-session reload               same conversation (fork), everything reloaded
 #   claude-tg-session resume <session-id>  an earlier conversation (fork): with the relay
 #                                          an extra session, without it it takes over
+#   claude-tg-session import <file> <title> a conversation copied from claude.ai, read from
+#                                          <file> (claude-tg-resume): like resume
 #   claude-tg-session new <model> [prompt] extra session next to the others (relay only)
 #   claude-tg-session close                close this session (relay only)
 # With the relay (TELEGRAM_RELAY=1), TELEGRAM_SESSION_PID names the session to
@@ -74,6 +76,13 @@ case "$mode" in
       prompt="This earlier conversation was resumed via /resume in Telegram, as an extra session next to the others. Summarise in one short Telegram message (reply tool) what it was about and where we left off, then wait for the user. Do not restart."
     fi
     ;;
+  import)
+    [ -f "$1" ] || { tg-send "Copied conversation not found."; exit 1; }
+    extra=()
+    how="and is now the Telegram session"
+    [ -S "$TG_DIR/relay.sock" ] && { adds=1; how="as an extra session next to the others"; }
+    prompt="A claude.ai session (\"$2\") was continued here via /resume in Telegram, $how. Its conversation so far is copied to $1: read that file first (the end matters most), then summarise in one short Telegram message (reply tool) what it was about and where it stands, and wait for the user. The original session on claude.ai is separate: work done there is not on this computer. Do not restart."
+    ;;
   new)
     [ -z "$1" ] && { tg-send "No model given."; exit 1; }
     adds=1
@@ -85,7 +94,7 @@ case "$mode" in
   close)
     [ -z "$old_id" ] && [ -z "$old_pid" ] && { tg-send "Closing failed: session not found."; exit 1; }
     ;;
-  *) echo "usage: $0 clear [prompt] | model <model> | mode <mode> | effort <level> | reload | resume <session-id> | new <model> [prompt] | close"; exit 2 ;;
+  *) echo "usage: $0 clear [prompt] | model <model> | mode <mode> | effort <level> | reload | resume <session-id> | import <file> <title> | new <model> [prompt] | close"; exit 2 ;;
 esac
 
 stop_old() {
