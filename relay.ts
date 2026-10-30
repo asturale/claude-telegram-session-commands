@@ -168,14 +168,18 @@ export function startRelayClient(o: {
   // find their way back to this session.
   bot.api.config.use(async (prev, method, payload, signal) => {
     const p = payload as Msg
-    if (state.multi && (method === 'sendMessage' || method === 'editMessageText') && typeof p.text === 'string') {
+    // A message from a session that isn't active gets a "↩ Reply to <label>"
+    // button, which also says where it comes from; the text stays clean, so it
+    // can be copied as is. Only when the message has buttons of its own does
+    // the label go in front of the text instead.
+    if (state.multi && !state.active && (method === 'sendMessage' || method === 'editMessageText') && typeof p.text === 'string') {
       const tag = p.parse_mode === 'MarkdownV2'
         ? `\\[${state.label.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&')}\\] `
         : `[${state.label}] `
-      if (!p.text.startsWith(tag) && p.text.length + tag.length <= 4096) {
+      if (p.reply_markup && !p.text.startsWith(tag) && p.text.length + tag.length <= 4096) {
         payload = { ...payload, text: tag + p.text }
       }
-      if (method === 'sendMessage' && !state.active && !p.reply_markup) {
+      if (!p.reply_markup) {
         payload = { ...payload, reply_markup: { inline_keyboard: [[
           { text: `↩ Reply to ${state.label}`, callback_data: `relay:use:${process.pid}` },
         ]] } }
