@@ -22,7 +22,8 @@
  * active carry a "Reply" button that makes it active.
  *
  * Handled by the relay itself (owner-only, so they work with no session open):
- *   /sessions          list sessions; tap one to switch, ✕ to close it
+ *   /sessions          list sessions; tap one to switch, ✕ to close it, 📈 to
+ *                      run /progress in it without switching
  *   /new [prompt]      `TELEGRAM_NEW_CMD <model> [prompt]` on TELEGRAM_DEFAULT_MODEL
  *                      (with TELEGRAM_NEW_MODEL_MENU=1: pick a model first)
  *   /close             close the active session (`TELEGRAM_CLOSE_CMD`)
@@ -266,6 +267,7 @@ async function runRelay(): Promise<void> {
   const CLOSE_CMD = process.env.TELEGRAM_CLOSE_CMD
   const INFO_CMD = process.env.TELEGRAM_SESSION_INFO_CMD
   const PIN_CMD = process.env.TELEGRAM_PIN_CMD
+  const PROGRESS = !!process.env.TELEGRAM_PROGRESS_CMD // handled by server.ts
   const AUTONAME_CMD = process.env.TELEGRAM_AUTONAME_CMD
   const AUTONAME_MS = 60_000 // after a message, wait this long before naming
   const AUTONAME_TRIES = 3
@@ -482,10 +484,11 @@ async function runRelay(): Promise<void> {
         text: `${c === active ? '● ' : ''}${label(c)}${c.name && c.model ? ` (${shortModel(c.model)})` : ''}${c.status ? ` · ${statusText(c)}` : ''}`,
         callback_data: `relay:use:${c.pid}`,
       },
+      ...(PROGRESS ? [{ text: '📈', callback_data: `relay:progress:${c.pid}` }] : []),
       { text: '✕', callback_data: `relay:ask:${c.pid}` },
     ])
     if (NEW_CMD) rows.push([{ text: '+ New session', callback_data: 'relay:newmenu' }])
-    await api.sendMessage(chat, 'Sessions (● = active). Tap to switch, ✕ to close:', {
+    await api.sendMessage(chat, `Sessions (● = active). Tap to switch${PROGRESS ? ', 📈 to follow without switching' : ''}, ✕ to close:`, {
       reply_markup: { inline_keyboard: rows },
     }).catch(e => log(`sessions failed: ${e}`))
   }
@@ -584,6 +587,21 @@ async function runRelay(): Promise<void> {
       case 'ask':
         await answer()
         await askClose(chat, c)
+        break
+      case 'progress':
+        if (!c) {
+          await answer('That session is closed.')
+          break
+        }
+        await answer(`Following ${label(c)}`)
+        // A /progress of its own, without making it the active session.
+        writeLine(c.sock, { t: 'update', update: {
+          update_id: u.update_id,
+          message: {
+            message_id: msgId ?? 0, date: Math.floor(Date.now() / 1000), chat: q.message?.chat ?? { id: q.from.id, type: 'private' },
+            from: q.from, text: '/progress', entities: [{ type: 'bot_command', offset: 0, length: 9 }],
+          },
+        } })
         break
       case 'close':
         if (!c) {
