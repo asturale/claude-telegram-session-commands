@@ -587,10 +587,11 @@ async function runRelay(): Promise<void> {
     proc.on('exit', code => {
       clearTimeout(me.timer)
       if (login === me) login = null
-      const last = out.trim().split('\n').map(l => l.trim()).filter(Boolean).pop() ?? ''
+      // The last line, without the prompt the code was typed after.
+      const last = (out.trim().split('\n').map(l => l.trim()).filter(Boolean).pop() ?? '').replace(/^.*>\s*/, '')
       log(`login exited ${code}: ${last}`)
       void api.sendMessage(chat, code === 0
-        ? `Signed in. ${last}\nSessions that asked for /login: /reload them.`
+        ? 'Signed in. Sessions that asked for /login: /reload them.'
         : `Sign-in didn't finish (exit ${code ?? 'killed'}). ${last}`).catch(() => {})
     })
     log('login started')
@@ -605,6 +606,8 @@ async function runRelay(): Promise<void> {
     const isReply = !!login.prompt && m.reply_to_message?.message_id === login.prompt
     if (!isReply && !/^[\w-]{20,}#[\w-]+$/.test(code)) return false
     login.proc.stdin!.write(`${code}\r`)
+    // The code is single-use, but needn't stay in the chat.
+    void api.deleteMessage(login.chat, m.message_id).catch(() => {})
     void api.sendMessage(login.chat, 'Code entered, checking…').catch(() => {})
     return true
   }
