@@ -23,7 +23,8 @@
  *
  * Handled by the relay itself (owner-only, so they work with no session open):
  *   /sessions          list sessions; tap one to switch, ✕ to close it
- *   /new [prompt]      pick a model, then `TELEGRAM_NEW_CMD <model> [prompt]`
+ *   /new [prompt]      `TELEGRAM_NEW_CMD <model> [prompt]` on TELEGRAM_DEFAULT_MODEL
+ *                      (with TELEGRAM_NEW_MODEL_MENU=1: pick a model first)
  *   /close             close the active session (`TELEGRAM_CLOSE_CMD`)
  *   /name [name]       name the active session (empty: back to the model name)
  * Names are kept per conversation in session-names.json, so scripts (such as a
@@ -31,6 +32,8 @@
  * With TELEGRAM_AUTO_NEW=1, closing the last session through /close or ✕ opens
  * a fresh one on TELEGRAM_DEFAULT_MODEL (default: the first TELEGRAM_MODELS
  * entry); at most once a minute, and never after a crash.
+ * A session opened without a prompt is announced by the relay as soon as it
+ * connects, so the session itself needn't spend a turn saying it's ready.
  * Commands run with TELEGRAM_SESSION_PID set to the server.ts pid of the
  * session they concern (for /new: the active one, to copy settings from).
  * TELEGRAM_SESSION_INFO_CMD, run the same way, prints JSON with optional
@@ -264,6 +267,9 @@ async function runRelay(): Promise<void> {
   const DEFAULT_MODEL = process.env.TELEGRAM_DEFAULT_MODEL ?? MODELS[0]?.value ?? ''
   const AUTO_NEW_MS = 60_000
   let lastAutoNew = 0
+  const NEW_MODEL_MENU = process.env.TELEGRAM_NEW_MODEL_MENU === '1'
+  const READY_MS = 180_000 // a /new session that connects within this is announced
+  let expectReady: { model: string, until: number }[] = []
 
   // One relay at a time.
   try {
@@ -431,9 +437,22 @@ async function runRelay(): Promise<void> {
     }).catch(e => log(`sessions failed: ${e}`))
   }
 
+  const modelLabel = (value: string) => MODELS.find(x => x.value === value)?.label ?? value
+
+  const startNew = (model: string, prompt: string) => {
+    // Without a prompt the session has nothing to say: announce it on connect.
+    if (!prompt) expectReady.push({ model, until: Date.now() + READY_MS })
+    void runWith(NEW_CMD!, prompt ? [model, prompt] : [model], active?.pid, true)
+  }
+
   const newMenu = async (chat: string, prompt: string) => {
     if (!NEW_CMD) {
       await api.sendMessage(chat, '/new is not configured (TELEGRAM_NEW_CMD).').catch(() => {})
+      return
+    }
+    if (!NEW_MODEL_MENU && DEFAULT_MODEL) {
+      await api.sendMessage(chat, `Opening a new session on ${modelLabel(DEFAULT_MODEL)}…`).catch(() => {})
+      startNew(DEFAULT_MODEL, prompt)
       return
     }
     const sent = await api.sendMessage(chat, 'Open a new session on:', {
@@ -547,7 +566,7 @@ async function runRelay(): Promise<void> {
         pendingNew.delete(key)
         await answer(`Starting ${model.label}…`)
         await edit(`Opening a new session on ${model.label}…`)
-        void runWith(NEW_CMD, prompt ? [model.value, prompt] : [model.value], active?.pid, true)
+        startNew(model.value, prompt ?? '')
         break
       }
       default:
@@ -674,10 +693,14 @@ async function runRelay(): Promise<void> {
         // A fork (/model, /clear …) gets a new conversation id: keep the name.
         if (inherited?.name) saveName(client)
         log(`session ${slot} connected (pid ${client.pid}${inherited ? `, replaces ${inherited.pid}` : ''}${back ? ', reconnected' : ''})`)
+        expectReady = expectReady.filter(e => e.until > Date.now())
+        const ready = !inherited && !back ? expectReady.shift() : undefined
+        if (ready) client.model ||= ready.model
         setActive(client)
         syncPins()
         flushWaiting()
         const c = client
+        if (ready) notify(`Session ${label(c)} is ready (${modelLabel(ready.model)}).`)
         for (const ms of [0, 5000, 20000, 60000]) setTimeout(() => void refresh(c), ms)
       } else if (msg.t === 'sent' && client) {
         owners.set(`${msg.chat}:${msg.id}`, client.pid)
@@ -703,8 +726,8 @@ async function runRelay(): Promise<void> {
         Date.now() - lastAutoNew > AUTO_NEW_MS
       if (autoNew) {
         lastAutoNew = Date.now()
-        const m = MODELS.find(x => x.value === DEFAULT_MODEL)?.label ?? DEFAULT_MODEL
-        notify(`Session ${label(c)} closed. Opening a fresh session on ${m}…`)
+        notify(`Session ${label(c)} closed. Opening a fresh session on ${modelLabel(DEFAULT_MODEL)}…`)
+        expectReady.push({ model: DEFAULT_MODEL, until: Date.now() + READY_MS })
         void runWith(NEW_CMD!, [DEFAULT_MODEL], undefined, true)
         return
       }
