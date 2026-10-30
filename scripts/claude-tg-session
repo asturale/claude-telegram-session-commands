@@ -6,7 +6,8 @@
 #   claude-tg-session mode <mode>          same conversation (fork) in another permission mode
 #   claude-tg-session effort <level>       same conversation (fork) with another effort level
 #   claude-tg-session reload               same conversation (fork), everything reloaded
-#   claude-tg-session resume <session-id>  an earlier conversation (fork) takes over
+#   claude-tg-session resume <session-id>  an earlier conversation (fork): with the relay
+#                                          an extra session, without it it takes over
 #   claude-tg-session new <model> [prompt] extra session next to the others (relay only)
 #   claude-tg-session close                close this session (relay only)
 # With the relay (TELEGRAM_RELAY=1), TELEGRAM_SESSION_PID names the session to
@@ -25,6 +26,7 @@ echo "=== $(date -Is) $*"
 PIDFILE="$TG_DIR/bot.pid"
 HANDOVER="$TG_DIR/relay-handover"
 mode="$1"; shift || true
+adds=""  # set: a session next to the others, the current one stays
 
 # A plugin update overwrites the patched server.ts, so reapply it first.
 claude-tg-patch-plugin || echo "claude-tg-patch-plugin failed (continuing)"
@@ -66,9 +68,15 @@ case "$mode" in
     ls "$HOME"/.claude/projects/*/"$1".jsonl >/dev/null 2>&1 || { tg-send "Session $1 not found."; exit 1; }
     extra=(--resume "$1" --fork-session)
     prompt="This earlier conversation was resumed via /resume in Telegram and is now the Telegram session. Summarise in one short Telegram message (reply tool) what it was about and where we left off, then wait for the user. Do not restart."
+    # With the relay it opens next to the current session instead of replacing it.
+    if [ -S "$TG_DIR/relay.sock" ]; then
+      adds=1
+      prompt="This earlier conversation was resumed via /resume in Telegram, as an extra session next to the others. Summarise in one short Telegram message (reply tool) what it was about and where we left off, then wait for the user. Do not restart."
+    fi
     ;;
   new)
     [ -z "$1" ] && { tg-send "No model given."; exit 1; }
+    adds=1
     model="$1"; shift
     extra=()
     prompt="Extra session opened via /new in Telegram, next to the existing ones. The relay has already told the user it is ready: send nothing, just wait for their first message."
@@ -95,7 +103,7 @@ stop_old() {
 
 before=$(cat "$PIDFILE" 2>/dev/null)
 srv="${TELEGRAM_SESSION_PID:-$before}"
-[ "$mode" != new ] && [ -n "$srv" ] && printf '{"from": %s}\n' "$srv" > "$HANDOVER"
+[ -z "$adds" ] && [ -n "$srv" ] && printf '{"from": %s}\n' "$srv" > "$HANDOVER"
 # --channels is variadic: keep it before the other options, or it eats the prompt.
 [ -n "$effort" ] && extra+=(--effort "$effort")
 if ! out=$(claude --bg --channels "$CHANNEL" --name telegram --model "$model" \
@@ -122,5 +130,5 @@ fi
 printf '{"id": "%s", "model": "%s", "perm": "%s", "effort": "%s"}\n' "$new_id" "$model" "$perm" "$effort" \
   | tee "$SESSIONS/$new_id.json" > "$STATE"
 
-[ "$mode" != new ] && stop_old
+[ -z "$adds" ] && stop_old
 exit 0
