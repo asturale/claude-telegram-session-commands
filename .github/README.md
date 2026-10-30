@@ -219,12 +219,18 @@ Bot API itself.
 - A session opened by `/new` (or `TELEGRAM_AUTO_NEW`) without a prompt is
   announced by the relay as soon as it connects ("Session 2·opus is ready"),
   so the session itself doesn't need a turn to say so.
+- With `TELEGRAM_AUTONAME_CMD`, a session without a name gets one after its
+  topic, as if set with `/name`: a minute after a message the relay runs the
+  command, which prints a short name, or nothing while the topic is still
+  unclear. It tries again after a later message, up to three times. A name you
+  set with `/name` always wins.
 
 | Variable | Invoked as |
 | --- | --- |
 | `TELEGRAM_NEW_CMD` | `<cmd> <model> [prompt]`, with `TELEGRAM_SESSION_PID` set to the active session (to copy its settings), unset if none is open |
 | `TELEGRAM_CLOSE_CMD` | `<cmd>`, with `TELEGRAM_SESSION_PID` set to the session to close |
 | `TELEGRAM_SESSION_INFO_CMD` | `<cmd>`, per session; prints JSON with optional `model` and `status` (`busy`/`idle`), used for the labels and `/sessions` |
+| `TELEGRAM_AUTONAME_CMD` | `<cmd> <session id>`, per unnamed session; prints a short name or nothing |
 
 The relay's commands work with no session open. It logs to `relay.log` in the
 state directory. A new `relay.ts` replaces the running relay when the first
