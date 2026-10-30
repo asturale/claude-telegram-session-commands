@@ -179,7 +179,7 @@ Bot API itself.
 | Command | What it does | Configured by |
 | --- | --- | --- |
 | `/sessions` | Open sessions as buttons: tap one to switch to it, ✕ to close it | `TELEGRAM_SESSION_INFO_CMD` (optional) |
-| `/new [prompt]` | Pick a model, then open an extra session next to the others | `TELEGRAM_NEW_CMD`, `TELEGRAM_MODELS` |
+| `/new [prompt]` | Open an extra session next to the others, on `TELEGRAM_DEFAULT_MODEL` (or the first `TELEGRAM_MODELS` entry); with `TELEGRAM_NEW_MODEL_MENU=1`, pick a model first | `TELEGRAM_NEW_CMD`, `TELEGRAM_MODELS` |
 | `/close` | Close the active session, after a confirmation | `TELEGRAM_CLOSE_CMD` |
 | `/name [name]` | Name the active session, so its label reads `2·mail` instead of `2·sonnet`; no name goes back to the model | — |
 
@@ -216,6 +216,9 @@ Bot API itself.
   `TELEGRAM_DEFAULT_MODEL`, or the first `TELEGRAM_MODELS` entry. This happens
   at most once a minute, and not when a session crashes or is stopped another
   way.
+- A session opened by `/new` (or `TELEGRAM_AUTO_NEW`) without a prompt is
+  announced by the relay as soon as it connects ("Session 2·opus is ready"),
+  so the session itself doesn't need a turn to say so.
 
 | Variable | Invoked as |
 | --- | --- |
