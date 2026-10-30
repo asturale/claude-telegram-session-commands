@@ -127,6 +127,13 @@ function onLines(sock: Socket, handle: (msg: Msg) => void): void {
 
 type MenuItem = { command: string; description: string; help: string }
 
+// Bot menu: daily use, managing the session, settings, information, rarely.
+const MENU_ORDER = 'sessions,new,progress,stop,btw,' +
+  'clear,resume,name,close,compact,reload,' +
+  'model,effort,mode,skill,' +
+  'status,usage,tasks,remember,' +
+  'login,help,start'
+
 export function startRelayClient(o: {
   bot: Bot
   menu: MenuItem[]
@@ -213,18 +220,20 @@ export function startRelayClient(o: {
       }
     }
     o.onReady(bot.botInfo.username)
-    // /sessions on top: switching is what the menu is used for most.
-    const menu = o.menu.map(({ command, description }) => ({ command, description }))
-    void bot.api.setMyCommands(
-      [
-        ...menu.filter(m => m.command === 'sessions'),
-        { command: 'start', description: 'Welcome and setup guide' },
-        { command: 'help', description: 'What this bot can do' },
-        { command: 'status', description: 'Check your pairing status' },
-        ...menu.filter(m => m.command !== 'sessions'),
-      ],
-      { scope: { type: 'all_private_chats' } },
-    ).catch(() => {})
+    // Most used first (TELEGRAM_MENU_ORDER overrides); commands not listed
+    // follow in their own order. A session command replaces a built-in one
+    // of the same name (/status).
+    const all = new Map<string, string>([
+      ['start', 'Welcome and setup guide'],
+      ['help', 'What this bot can do'],
+      ['status', 'Check your pairing status'],
+    ])
+    for (const m of o.menu) all.set(m.command, m.description)
+    const order = (process.env.TELEGRAM_MENU_ORDER ?? MENU_ORDER).split(',').map(s => s.trim().replace(/^\//, ''))
+    const rank = (c: string) => (order.includes(c) ? order.indexOf(c) : order.length)
+    const commands = [...all].map(([command, description]) => ({ command, description }))
+      .sort((a, b) => rank(a.command) - rank(b.command)) // stable: unlisted keep their order
+    void bot.api.setMyCommands(commands, { scope: { type: 'all_private_chats' } }).catch(() => {})
     connect()
   })()
 }

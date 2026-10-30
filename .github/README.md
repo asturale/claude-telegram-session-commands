@@ -184,6 +184,10 @@ Bot API itself.
 | `/name [name]` | Name the active session, so its label reads `2·mail` instead of `2·sonnet`; no name goes back to the model | — |
 | `/login` | Sign Claude Code in again from the chat: the relay runs the login command in a pseudo-terminal, sends you its sign-in link and types in the code you send back as a reply. Works while every session is stuck on `/login` | `TELEGRAM_LOGIN_CMD` (for example `claude auth login`) |
 
+- The bot menu lists the most used commands first: `/sessions`, `/new`,
+  `/progress`, `/stop`, `/btw`, then managing the session, settings,
+  information, and `/login`, `/help`, `/start` last. `TELEGRAM_MENU_ORDER`
+  (comma-separated) sets your own order; commands it leaves out follow.
 - Plain messages go to the active session. A swipe-reply goes to the session
   that sent the message you reply to; the active session stays the same
   (`TELEGRAM_REPLY_SWITCHES=1`: the reply makes that session active). A button
