@@ -313,7 +313,11 @@ async function runRelay(): Promise<void> {
   }
 
   // Left by the previous relay when it exited (see shutdown).
-  type Snapshot = { active: number | null, sessions: { pid: number, slot: number, name: string, model: string }[] }
+  type Snapshot = {
+    active: number | null
+    sessions: { pid: number, slot: number, name: string, model: string }[]
+    owners?: [string, number][]
+  }
   let restart: Snapshot | null = null
   const restartUntil = Date.now() + RESTART_MS
   try {
@@ -332,7 +336,7 @@ async function runRelay(): Promise<void> {
   let active: Client | null = null
   let offset = 0
   let exiting = false
-  const owners = new Map<string, number>() // `${chat}:${message_id}` → client pid
+  const owners = new Map<string, number>(restart?.owners ?? []) // `${chat}:${message_id}` → client pid
   const pendingNew = new Map<string, string>() // `${chat}:${message_id}` → prompt
   let waiting: Update[] = []
   let waitTimer: ReturnType<typeof setTimeout> | null = null
@@ -356,6 +360,14 @@ async function runRelay(): Promise<void> {
     }
   }
   const byPid = (pid: number) => clients.find(c => c.pid === pid) ?? null
+  // The session a message came from, by the label it starts with ("[🔵 2·opus] …"):
+  // for messages the relay has no owner for (sent before it started, or by a
+  // session that has since been replaced under the same number).
+  const bySlotTag = (text: string | undefined) => {
+    const t = /^\[(?:\S+ )?(\d+)(?:·[^\]]*)?\]/.exec(text ?? '')
+    const of = t ? clients.filter(c => c.slot === Number(t[1])) : []
+    return of.find(c => !c.replaced) ?? of[0] ?? null
+  }
   const shortModel = (m: string) => m.replace(/\[.*\]$/, '').replace(/^claude-/, '').replace(/[-.\d]+$/, '')
   // A fixed colour per number, so sessions are recognisable at a glance.
   const DOTS = ['🟢', '🔵', '🟣', '🟠', '🟡', '🔴', '🟤', '⚪']
@@ -728,8 +740,9 @@ async function runRelay(): Promise<void> {
     const m = u.message
     if (q?.message) {
       const pid = owners.get(`${q.message.chat.id}:${q.message.message_id}`)
-      if (pid != null) {
-        const c = byPid(pid)
+      const tagged = bySlotTag('text' in q.message ? q.message.text : undefined)
+      if (pid != null || tagged) {
+        const c = (pid != null ? byPid(pid) : null) ?? tagged
         if (c) deliver(c, u)
         else await api.answerCallbackQuery(q.id, { text: 'That session is closed.' }).catch(() => {})
         return
@@ -741,7 +754,8 @@ async function runRelay(): Promise<void> {
     }
     if (m?.reply_to_message) {
       const pid = owners.get(`${m.chat.id}:${m.reply_to_message.message_id}`)
-      const c = pid != null ? byPid(pid) : null
+      const r = m.reply_to_message
+      const c = (pid != null ? byPid(pid) : null) ?? bySlotTag('text' in r ? r.text : r.caption)
       if (c) {
         if (c !== active && m.chat.type === 'private' && owner(m.from?.id)) setActive(c)
         deliver(c, u)
@@ -789,6 +803,7 @@ async function runRelay(): Promise<void> {
       writeFileSync(RESTART_FILE, JSON.stringify({
         active: active?.pid ?? null,
         sessions: clients.map(c => ({ pid: c.pid, slot: c.slot, name: c.name, model: c.model })),
+        owners: [...owners],
       }))
     } catch {}
     process.exit(0)
