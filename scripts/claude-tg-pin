@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Pin the active Telegram session (TELEGRAM_PIN_CMD), so the daemon keeps it.
+"""Pin the open Telegram sessions (TELEGRAM_PIN_CMD), so the daemon keeps them.
 
 The Claude Code daemon retires background sessions that are done and have been
 idle for an hour; pinned sessions (`claude agents`, ~/.claude/jobs/pins.json)
-are kept. The relay runs this whenever the active session changes:
-  claude-tg-pin          pin the session of TELEGRAM_SESSION_PID (else bot.pid)
-                         and unpin the one pinned before
-  claude-tg-pin --none   only unpin the one pinned before
-Only the session this script pinned is unpinned, never pins you set yourself.
-The other sessions can be retired; /resume brings them back.
+are kept. The relay runs this whenever the set of sessions changes:
+  claude-tg-pin --all PID…  pin the sessions of these server.ts pids and unpin
+                            the ones pinned before that are not among them
+  claude-tg-pin             the same for TELEGRAM_SESSION_PID (else bot.pid)
+  claude-tg-pin --none      only unpin the ones pinned before
+Only sessions this script pinned are unpinned, never pins you set yourself.
+If a pid can't be resolved, nothing is unpinned that round.
 
 pins.json is a JSON array of session ids. Writes take the same lock the daemon
 takes (the directory pins.json.lock) and replace the file atomically.
@@ -23,7 +24,7 @@ os.environ["PATH"] = f"{here}:{HOME}/.local/bin:" + os.environ.get("PATH", "")
 PINS = HOME / ".claude/jobs/pins.json"
 LOCK = PINS.with_name("pins.json.lock")
 STALE = 10  # seconds; the daemon treats its lock as stale after 5
-MINE = HOME / ".local/state/claude-tg/pinned"  # the session id this script pinned
+MINE = HOME / ".local/state/claude-tg/pinned"  # the session ids this script pinned, one per line
 LOG = HOME / ".local/state/claude-tg/session.log"
 
 
@@ -59,9 +60,8 @@ def update(add, remove):
             pins = [p for p in pins if isinstance(p, str)] if isinstance(pins, list) else []
         except (OSError, ValueError):
             pins = []
-        new = [p for p in pins if p != remove]
-        if add and add not in new:
-            new.append(add)
+        new = [p for p in pins if p not in remove]
+        new += [a for a in add if a not in new]
         if new != pins:
             tmp = PINS.with_name(f".pins.json.{os.getpid()}")
             tmp.write_text(json.dumps(new, indent=2))
@@ -71,20 +71,41 @@ def update(add, remove):
         LOCK.rmdir()
 
 
+def session_id(pid):
+    env = dict(os.environ)
+    if pid:
+        env["TELEGRAM_SESSION_PID"] = pid
+    out = subprocess.run(["claude-tg-current"], capture_output=True, text=True,
+                         timeout=30, env=env).stdout
+    return json.loads(out or "{}").get("id", "")
+
+
 try:
-    before = MINE.read_text().strip()
+    before = MINE.read_text().split()
 except OSError:
-    before = ""
-now = ""
-if "--none" not in sys.argv[1:]:
-    cur = json.loads(subprocess.run(["claude-tg-current"], capture_output=True, text=True,
-                                    timeout=30).stdout or "{}")
-    now = cur.get("id", "")
-    if not now:
-        log("no background session found, nothing pinned")
-if now == before:
+    before = []
+args = sys.argv[1:]
+if "--none" in args:
+    pids = []
+elif "--all" in args:
+    pids = [a for a in args if a != "--all"]
+else:
+    pids = [os.environ.get("TELEGRAM_SESSION_PID", "")]
+now, missed = [], False
+for pid in pids:
+    sid = session_id(pid)
+    if sid and sid not in now:
+        now.append(sid)
+    elif not sid:
+        missed = True
+        log(f"no background session found for pid {pid or '-'}")
+remove = [] if missed else [b for b in before if b not in now]
+add = [n for n in now if n not in before]
+if not add and not remove:
     sys.exit(0)
-if update(now, before):
+if update(now, remove):
+    keep = [b for b in before if b not in remove]
+    keep += [n for n in now if n not in keep]
     MINE.parent.mkdir(parents=True, exist_ok=True)
-    MINE.write_text(now)
-    log(f"pinned {now or '-'}, unpinned {before or '-'}")
+    MINE.write_text("".join(f"{k}\n" for k in keep))
+    log(f"pinned {' '.join(add) or '-'}, unpinned {' '.join(remove) or '-'}")
