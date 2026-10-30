@@ -212,12 +212,15 @@ export function startRelayClient(o: {
       }
     }
     o.onReady(bot.botInfo.username)
+    // /sessions on top: switching is what the menu is used for most.
+    const menu = o.menu.map(({ command, description }) => ({ command, description }))
     void bot.api.setMyCommands(
       [
+        ...menu.filter(m => m.command === 'sessions'),
         { command: 'start', description: 'Welcome and setup guide' },
         { command: 'help', description: 'What this bot can do' },
         { command: 'status', description: 'Check your pairing status' },
-        ...o.menu.map(({ command, description }) => ({ command, description })),
+        ...menu.filter(m => m.command !== 'sessions'),
       ],
       { scope: { type: 'all_private_chats' } },
     ).catch(() => {})
