@@ -1,0 +1,67 @@
+#!/bin/bash
+# TELEGRAM_TRANSCRIBE_CMD: `claude-tg-transcribe <audio file>` prints the
+# transcript of a voice message, using a local whisper.cpp build.
+#
+# whisper detects the language itself. On a short or noisy message it can pick
+# a wrong one, and then turns your words into nonsense in that language. List
+# the languages you speak in CLAUDE_TG_TRANSCRIBE_LANGS: when whisper detects
+# another one, the message is transcribed again in the first language listed.
+# A small model then fixes obvious recognition errors (headless, no tools);
+# when that fails or times out, the raw transcript is printed.
+# Settings (~/.config/claude-tg.env):
+#   CLAUDE_TG_WHISPER_CLI      path to whisper-cli (default: whisper-cli on PATH)
+#   CLAUDE_TG_WHISPER_MODEL    path to a ggml model file (required)
+#   CLAUDE_TG_TRANSCRIBE_LANGS comma-separated language codes, e.g. "nl,en"
+#                              (default: empty, any detected language is kept)
+#   CLAUDE_TG_TRANSCRIBE_FIX_MODEL  model for the clean-up (default: haiku;
+#                              empty: off)
+set -euo pipefail
+. "$(dirname "$(readlink -f "$0")")/claude-tg-common.sh"
+
+: "${CLAUDE_TG_WHISPER_CLI:=whisper-cli}"
+: "${CLAUDE_TG_WHISPER_MODEL:?set CLAUDE_TG_WHISPER_MODEL in ~/.config/claude-tg.env}"
+: "${CLAUDE_TG_TRANSCRIBE_LANGS:=}"
+: "${CLAUDE_TG_TRANSCRIBE_FIX_MODEL=haiku}"
+
+in=${1:?usage: claude-tg-transcribe <audio file>}
+[ -f "$in" ] || { echo "no such file: $in" >&2; exit 1; }
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+# whisper.cpp wants 16 kHz mono PCM; Telegram voice messages are ogg/opus.
+ffmpeg -y -loglevel error -i "$in" -ar 16000 -ac 1 -c:a pcm_s16le "$tmp/in.wav"
+
+whisper() { # <language> → transcript on stdout, whisper's log in $tmp/log
+  "$CLAUDE_TG_WHISPER_CLI" -m "$CLAUDE_TG_WHISPER_MODEL" -f "$tmp/in.wav" -l "$1" \
+    --no-timestamps 2>"$tmp/log" | sed '/^\s*$/d; s/^\s*//'
+}
+
+text=$(whisper auto)
+if [ -n "$CLAUDE_TG_TRANSCRIBE_LANGS" ]; then
+  detected=$(sed -n 's/.*auto-detected language: \([a-z]*\).*/\1/p' "$tmp/log" | head -1)
+  if [ -n "$detected" ] && [[ ",$CLAUDE_TG_TRANSCRIBE_LANGS," != *",$detected,"* ]]; then
+    text=$(whisper "${CLAUDE_TG_TRANSCRIBE_LANGS%%,*}")
+  fi
+fi
+[ -n "$text" ] || exit 0
+
+if [ -n "$CLAUDE_TG_TRANSCRIBE_FIX_MODEL" ]; then
+  prompt="Below is an automatic speech-to-text transcript of a voice message${CLAUDE_TG_TRANSCRIBE_LANGS:+ (spoken in one of: $CLAUDE_TG_TRANSCRIBE_LANGS)}. \
+Fix obvious recognition errors: misheard or garbled words, word boundaries, punctuation. \
+Keep the wording and meaning; do not add, drop, summarize, translate or answer anything. \
+Where a word could be either of two opposites (on/off, yes/no), keep what the transcript says. \
+If it is unintelligible, return it unchanged. Output only the transcript.
+
+<transcript>
+$text
+</transcript>"
+  # Run outside any project, so no CLAUDE.md or project settings join in.
+  fixed=$(cd "$tmp" && printf '%s' "$prompt" | timeout 60 claude -p --model "$CLAUDE_TG_TRANSCRIBE_FIX_MODEL" \
+    --setting-sources "" --settings '{"enabledPlugins":{"telegram@claude-plugins-official":false}}' \
+    --strict-mcp-config --no-session-persistence --disable-slash-commands --tools "" 2>/dev/null) || fixed=
+  # claude -p leaves an empty project directory behind for its working directory.
+  rm -rf "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(printf '%s' "$tmp" | sed 's/[^a-zA-Z0-9]/-/g')"
+  fixed=$(printf '%s' "$fixed" | sed '/^<\/\?transcript>$/d; /^\s*$/d')
+  [ -n "$fixed" ] && text=$fixed
+fi
+printf '%s\n' "$text"

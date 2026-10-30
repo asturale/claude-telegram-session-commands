@@ -37,6 +37,27 @@ That means they work while the session is busy, or stuck waiting on a
 permission prompt. Only allowlisted senders can use them. A command whose
 variable is unset stays hidden from the bot menu and `/help`.
 
+## Voice messages and answer buttons
+
+With `TELEGRAM_TRANSCRIBE_CMD` set, the plugin transcribes a voice message
+itself and shows the transcript back with **Send** and **Discard** buttons.
+Only Send passes it on to Claude, as if you had typed it. So a misheard word
+("on" heard as "off") never turns into an action. Discard passes on nothing.
+If the command fails or prints nothing, the voice message is passed on as it
+was, as an attachment. Other messages are not held up while a transcription
+runs.
+
+`scripts/claude-tg-transcribe` does this with a local
+[whisper.cpp](https://github.com/ggml-org/whisper.cpp) build. If whisper
+detects a language that is not in `CLAUDE_TG_TRANSCRIBE_LANGS` (for example
+`nl,en`), it transcribes the message again in the first listed language.
+After that, a small model (`CLAUDE_TG_TRANSCRIBE_FIX_MODEL`, default `haiku`,
+empty to turn it off) fixes obvious recognition errors.
+
+The `reply` tool also takes `buttons`, for example `["Yes", "No"]`. They appear
+under the message. A tap reaches Claude as a message whose text is the label,
+with `button_reply` in its meta. The buttons are then replaced by the choice.
+
 In `manual` mode, permission prompts already reach Telegram as Allow/Deny
 buttons (upstream behaviour). So `/mode` → manual is a practical way to step
 through something that auto mode refuses, then switch back.
@@ -71,6 +92,9 @@ TELEGRAM_TASKS_CMD=/path/to/tasks-script
 TELEGRAM_PROGRESS_CMD=/path/to/progress-script
 TELEGRAM_PROGRESS_INTERVAL=5        # seconds between updates
 TELEGRAM_PROGRESS_MAX_MINUTES=15    # stop following after this
+# Voice messages
+TELEGRAM_TRANSCRIBE_CMD=/path/to/transcribe-script
+TELEGRAM_TRANSCRIBE_TIMEOUT=300     # seconds
 ```
 
 | Variable | Invoked as |
@@ -86,6 +110,7 @@ TELEGRAM_PROGRESS_MAX_MINUTES=15    # stop following after this
 | `TELEGRAM_RESUME_CMD` | `<cmd> list` prints `value<TAB>label` lines; `<cmd> <value>` on tap. A line with value `page-<n>` becomes a paging button: tapping it runs `<cmd> list <n>` and replaces the buttons |
 | `TELEGRAM_TASKS_CMD` | `<cmd> list` as above; `<cmd> result <value>` or `<cmd> stop <value>` on tap, stdout is the reply |
 | `TELEGRAM_PROGRESS_CMD` | `<cmd>`, repeatedly; stdout is the message, exit 0 = still busy, anything else = done |
+| `TELEGRAM_TRANSCRIBE_CMD` | `<cmd> <audio file>`; stdout is the transcript |
 
 `TELEGRAM_MODELS`, `TELEGRAM_MODES` and `TELEGRAM_EFFORTS` are `label=value`
 lists separated by commas. Picker values must match `[A-Za-z0-9_.-]{1,40}`,
