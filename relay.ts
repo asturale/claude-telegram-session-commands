@@ -24,7 +24,8 @@
  * Handled by the relay itself (owner-only, so they work with no session open):
  *   /sessions          list sessions; tap one to switch, ✕ to close it, 📈 to
  *                      run /progress in it without switching
- *   /new [prompt]      `TELEGRAM_NEW_CMD <model> [prompt]` on TELEGRAM_DEFAULT_MODEL
+ *   /new [#name] [prompt]  `TELEGRAM_NEW_CMD <model> [prompt]` on TELEGRAM_DEFAULT_MODEL,
+ *                      named `name` when it connects
  *                      (with TELEGRAM_NEW_MODEL_MENU=1: pick a model first)
  *   /close             close the active session (`TELEGRAM_CLOSE_CMD`)
  *   /name [name]       name the active session (empty: back to the model name)
@@ -299,7 +300,8 @@ async function runRelay(): Promise<void> {
   let lastAutoNew = 0
   const NEW_MODEL_MENU = process.env.TELEGRAM_NEW_MODEL_MENU === '1'
   const READY_MS = 180_000 // a /new session that connects within this is announced
-  let expectReady: { model: string, until: number }[] = []
+  // Sessions /new is opening: named on connect, announced if they have no prompt.
+  let expectReady: { model: string, until: number, name?: string, announce: boolean }[] = []
 
   // One relay at a time.
   try {
@@ -521,9 +523,13 @@ async function runRelay(): Promise<void> {
 
   const modelLabel = (value: string) => MODELS.find(x => x.value === value)?.label ?? value
 
-  const startNew = (model: string, prompt: string) => {
+  // `text` is what followed /new: an optional #name, then the prompt.
+  const startNew = (model: string, text: string) => {
+    const nm = /^#(\S+)\s*([\s\S]*)$/.exec(text.trim())
+    const name = nm ? nm[1].slice(0, 24) : undefined
+    const prompt = (nm ? nm[2] : text).trim()
     // Without a prompt the session has nothing to say: announce it on connect.
-    if (!prompt) expectReady.push({ model, until: Date.now() + READY_MS })
+    expectReady.push({ model, until: Date.now() + READY_MS, name, announce: !prompt })
     void runWith(NEW_CMD!, prompt ? [model, prompt] : [model], active?.pid, true)
   }
 
@@ -890,6 +896,10 @@ async function runRelay(): Promise<void> {
         expectReady = expectReady.filter(e => e.until > Date.now())
         const ready = !inherited && !took && !back && !old ? expectReady.shift() : undefined
         if (ready) client.model ||= ready.model
+        if (ready?.name && !client.name) {
+          client.name = ready.name
+          saveName(client)
+        }
         // After a relay restart, the session that was active stays active.
         const wasActive = restarting() && [pid, took?.pid].includes(restart!.active ?? -1)
         if (!old && (!restarting() || !active || wasActive || (inherited && inherited === active))) setActive(client)
@@ -897,7 +907,7 @@ async function runRelay(): Promise<void> {
         syncPins()
         flushWaiting()
         const c = client
-        if (ready) notify(`Session ${label(c)} is ready (${modelLabel(ready.model)}).`)
+        if (ready?.announce) notify(`Session ${label(c)} is ready (${modelLabel(ready.model)}).`)
         for (const ms of [0, 5000, 20000, 60000]) setTimeout(() => void refresh(c), ms)
       } else if (msg.t === 'sent' && client) {
         owners.set(`${msg.chat}:${msg.id}`, client.pid)
@@ -924,7 +934,7 @@ async function runRelay(): Promise<void> {
       if (autoNew) {
         lastAutoNew = Date.now()
         notify(`Session ${label(c)} closed. Opening a fresh session on ${modelLabel(DEFAULT_MODEL)}…`)
-        expectReady.push({ model: DEFAULT_MODEL, until: Date.now() + READY_MS })
+        expectReady.push({ model: DEFAULT_MODEL, until: Date.now() + READY_MS, announce: true })
         void runWith(NEW_CMD!, [DEFAULT_MODEL], undefined, true)
         return
       }
