@@ -195,10 +195,12 @@ Bot API itself.
   that sent the message you reply to; the active session stays the same
   (`TELEGRAM_REPLY_SWITCHES=1`: the reply makes that session active). A button
   tap goes to the session that sent the button.
-- With two or more sessions open, every message from a session starts with its
-  label, for example `[🔵 2·sonnet]`. Each number has a fixed coloured dot
-  (`TELEGRAM_SESSION_DOTS=0` turns them off). A message from a session that isn't active
-  gets a "↩ Reply to 2·sonnet" button that makes it active.
+- With two or more sessions open, a message from a session that isn't active
+  gets a "↩ Reply to 🔵 2·sonnet" button that shows where it comes from and
+  makes it active. The text itself stays as the session wrote it, so it can be
+  copied; only a message with buttons of its own starts with the label
+  instead, for example `[🔵 2·sonnet]`. Each number has a fixed coloured dot
+  (`TELEGRAM_SESSION_DOTS=0` turns them off).
 - Permission replies (`yes abcde`) go to all sessions. Only the one that asked
   knows the code.
 - The other commands (`/stop`, `/model`, `/progress`, …) act on the active
