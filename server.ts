@@ -1465,9 +1465,12 @@ async function handleInbound(
   // A reply: what it answers, so Claude has the context. The part the user
   // quoted if they did, else the start of the message. Meta values sit inside
   // the <channel> tag, so keep them to one line without delimiters.
+  // Only text from the bot or an allowlisted sender: in a group the replied-to
+  // message may come from someone the gate would have dropped.
   const r = ctx.message?.reply_to_message
-  const replyText = (ctx.message?.quote?.text ?? (r && ('text' in r ? r.text : r.caption)) ?? '')
-    .replace(/\s+/g, ' ').replace(/[<>"]/g, '').trim()
+  const trusted = !!r?.from && (r.from.username === botUsername || r.from.id === from.id || access.allowFrom.includes(String(r.from.id)))
+  const replyText = (trusted ? ctx.message?.quote?.text ?? ('text' in r! ? r!.text : r!.caption) ?? '' : '')
+    .replace(/\s+/g, ' ').replace(/[<>"\[\];]/g, '').trim()
   const replyMeta = r ? {
     reply_to: String(r.message_id),
     ...(r.from?.username === botUsername ? { reply_to_from: 'bot' } : {}),
