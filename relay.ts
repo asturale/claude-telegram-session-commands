@@ -28,6 +28,10 @@
  *                      (with TELEGRAM_NEW_MODEL_MENU=1: pick a model first)
  *   /close             close the active session (`TELEGRAM_CLOSE_CMD`)
  *   /name [name]       name the active session (empty: back to the model name)
+ *   /login             run TELEGRAM_LOGIN_CMD (`claude auth login`) in a
+ *                      pseudo-terminal: its sign-in link goes to the chat, the
+ *                      code you send back (as a reply) is typed in
+ * Sessions get a fixed coloured dot per number (TELEGRAM_SESSION_DOTS=0: none).
  * Names are kept per conversation in session-names.json, so scripts (such as a
  * /resume picker) can show them too, and carry over to a session's replacement.
  * With TELEGRAM_AUTO_NEW=1, closing the last session through /close or ✕ opens
@@ -137,6 +141,7 @@ export function startRelayClient(o: {
     { command: 'new', description: 'Open an extra session', help: '/new [prompt] — open an extra session' },
     { command: 'close', description: 'Close the active session', help: '/close — close the active session' },
     { command: 'name', description: 'Name the active session', help: '/name [name] — name the active session (empty: model name)' },
+    ...(process.env.TELEGRAM_LOGIN_CMD ? [{ command: 'login', description: 'Sign Claude Code in again', help: '/login — sign Claude Code in again (link, then send the code back)' }] : []),
   )
 
   let state = { label: '', active: true, multi: false }
@@ -268,6 +273,8 @@ async function runRelay(): Promise<void> {
   const INFO_CMD = process.env.TELEGRAM_SESSION_INFO_CMD
   const PIN_CMD = process.env.TELEGRAM_PIN_CMD
   const PROGRESS = !!process.env.TELEGRAM_PROGRESS_CMD // handled by server.ts
+  const LOGIN_CMD = process.env.TELEGRAM_LOGIN_CMD
+  const LOGIN_MS = 10 * 60_000
   const AUTONAME_CMD = process.env.TELEGRAM_AUTONAME_CMD
   const AUTONAME_MS = 60_000 // after a message, wait this long before naming
   const AUTONAME_TRIES = 3
@@ -350,8 +357,11 @@ async function runRelay(): Promise<void> {
   }
   const byPid = (pid: number) => clients.find(c => c.pid === pid) ?? null
   const shortModel = (m: string) => m.replace(/\[.*\]$/, '').replace(/^claude-/, '').replace(/[-.\d]+$/, '')
+  // A fixed colour per number, so sessions are recognisable at a glance.
+  const DOTS = ['🟢', '🔵', '🟣', '🟠', '🟡', '🔴', '🟤', '⚪']
+  const dot = (slot: number) => (process.env.TELEGRAM_SESSION_DOTS === '0' ? '' : `${DOTS[(slot - 1) % DOTS.length]} `)
   const label = (c: Client) =>
-    c.name ? `${c.slot}·${c.name}` : c.model ? `${c.slot}·${shortModel(c.model)}` : `${c.slot}`
+    dot(c.slot) + (c.name ? `${c.slot}·${c.name}` : c.model ? `${c.slot}·${shortModel(c.model)}` : `${c.slot}`)
   const loadNames = (): Record<string, string> => {
     try {
       return JSON.parse(readFileSync(NAMES_FILE, 'utf8'))
@@ -544,13 +554,69 @@ async function runRelay(): Promise<void> {
       : `Session ${before} is back to its model name: ${label(c)}.`).catch(() => {})
   }
 
+  // /login: LOGIN_CMD (`claude auth login`) in a pseudo-terminal. Its sign-in
+  // link goes to the chat; the code that comes back is typed in.
+  let login: { proc: ReturnType<typeof spawn>, chat: string, prompt: number, timer: ReturnType<typeof setTimeout> } | null = null
+
+  const startLogin = async (chat: string) => {
+    if (!LOGIN_CMD) {
+      await api.sendMessage(chat, '/login is not configured (TELEGRAM_LOGIN_CMD).').catch(() => {})
+      return
+    }
+    if (login) login.proc.kill()
+    const env = { ...process.env, TERM: 'dumb', BROWSER: 'true' }
+    const proc = spawn('script', ['-qfec', LOGIN_CMD, '/dev/null'], { stdio: ['pipe', 'pipe', 'pipe'], env })
+    const me = { proc, chat, prompt: 0, timer: setTimeout(() => proc.kill(), LOGIN_MS) }
+    login = me
+    let out = ''
+    let asked = false
+    const onData = async (d: Buffer) => {
+      // Drop terminal links (OSC 8, keeps the visible text) and other escapes.
+      out += d.toString().replace(/\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')
+      const url = /https:\/\/\S+/.exec(out)?.[0]
+      if (asked || !url || !/paste|code/i.test(out.slice(out.indexOf(url) + url.length))) return
+      asked = true
+      const sent = await api.sendMessage(chat, `Open this link, sign in, then send me the code you get (as a reply to this message):\n\n${url}`, {
+        reply_markup: { force_reply: true, input_field_placeholder: 'Code' },
+        link_preview_options: { is_disabled: true },
+      }).catch(e => (log(`login link failed: ${e}`), null))
+      if (sent) me.prompt = sent.message_id
+    }
+    proc.stdout!.on('data', onData)
+    proc.stderr!.on('data', onData)
+    proc.on('exit', code => {
+      clearTimeout(me.timer)
+      if (login === me) login = null
+      const last = out.trim().split('\n').map(l => l.trim()).filter(Boolean).pop() ?? ''
+      log(`login exited ${code}: ${last}`)
+      void api.sendMessage(chat, code === 0
+        ? `Signed in. ${last}\nSessions that asked for /login: /reload them.`
+        : `Sign-in didn't finish (exit ${code ?? 'killed'}). ${last}`).catch(() => {})
+    })
+    log('login started')
+  }
+
+  // The code for a pending /login: a reply to the link, or any message that
+  // looks like one (code#state).
+  const handleLoginCode = (u: Update): boolean => {
+    const m = u.message
+    if (!login || !m?.text || m.chat.type !== 'private' || !owner(m.from?.id) || String(m.chat.id) !== login.chat) return false
+    const code = m.text.trim()
+    const isReply = !!login.prompt && m.reply_to_message?.message_id === login.prompt
+    if (!isReply && !/^[\w-]{20,}#[\w-]+$/.test(code)) return false
+    login.proc.stdin!.write(`${code}\r`)
+    void api.sendMessage(login.chat, 'Code entered, checking…').catch(() => {})
+    return true
+  }
+
   const handleCommand = async (u: Update): Promise<boolean> => {
     const m = u.message
     if (!m || m.chat.type !== 'private' || !owner(m.from?.id)) return false
-    const cm = /^\/(sessions|new|close|name)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(m.text ?? '')
+    const cm = /^\/(sessions|new|close|name|login)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(m.text ?? '')
     if (!cm) return false
     const chat = String(m.chat.id)
     if (cm[1] === 'sessions') await sessionsList(chat)
+    else if (cm[1] === 'login') await startLogin(chat)
     else if (cm[1] === 'new') await newMenu(chat, (cm[2] ?? '').trim())
     else if (cm[1] === 'name') await nameSession(chat, active, (cm[2] ?? '').trim())
     else await askClose(chat, active)
@@ -652,6 +718,7 @@ async function runRelay(): Promise<void> {
 
   const route = async (u: Update) => {
     if (await handleCommand(u)) return
+    if (handleLoginCode(u)) return
     if (await handleCallback(u)) return
 
     const q = u.callback_query

@@ -178,16 +178,18 @@ Bot API itself.
 
 | Command | What it does | Configured by |
 | --- | --- | --- |
-| `/sessions` | Open sessions as buttons: tap one to switch to it, ✕ to close it | `TELEGRAM_SESSION_INFO_CMD` (optional) |
+| `/sessions` | Open sessions as buttons: tap one to switch to it, 📈 to follow it with `/progress` without switching, ✕ to close it | `TELEGRAM_SESSION_INFO_CMD` (optional) |
 | `/new [prompt]` | Open an extra session next to the others, on `TELEGRAM_DEFAULT_MODEL` (or the first `TELEGRAM_MODELS` entry); with `TELEGRAM_NEW_MODEL_MENU=1`, pick a model first | `TELEGRAM_NEW_CMD`, `TELEGRAM_MODELS` |
 | `/close` | Close the active session, after a confirmation | `TELEGRAM_CLOSE_CMD` |
 | `/name [name]` | Name the active session, so its label reads `2·mail` instead of `2·sonnet`; no name goes back to the model | — |
+| `/login` | Sign Claude Code in again from the chat: the relay runs the login command in a pseudo-terminal, sends you its sign-in link and types in the code you send back as a reply. Works while every session is stuck on `/login` | `TELEGRAM_LOGIN_CMD` (for example `claude auth login`) |
 
 - Plain messages go to the active session. A swipe-reply goes to the session
   that sent the message you reply to, and makes that session active. A button
   tap goes to the session that sent the button.
 - With two or more sessions open, every message from a session starts with its
-  label, for example `[2·sonnet]`. A message from a session that isn't active
+  label, for example `[🔵 2·sonnet]`. Each number has a fixed coloured dot
+  (`TELEGRAM_SESSION_DOTS=0` turns them off). A message from a session that isn't active
   gets a "↩ Reply to 2·sonnet" button that makes it active.
 - Permission replies (`yes abcde`) go to all sessions. Only the one that asked
   knows the code.
@@ -219,6 +221,8 @@ Bot API itself.
 - A session opened by `/new` (or `TELEGRAM_AUTO_NEW`) without a prompt is
   announced by the relay as soon as it connects ("Session 2·opus is ready"),
   so the session itself doesn't need a turn to say so.
+- After a relay restart (a new `relay.ts`), sessions keep their numbers,
+  names and which one is active.
 - With `TELEGRAM_AUTONAME_CMD`, a session without a name gets one after its
   topic, as if set with `/name`: a minute after a message the relay runs the
   command, which prints a short name, or nothing while the topic is still
@@ -231,6 +235,7 @@ Bot API itself.
 | `TELEGRAM_CLOSE_CMD` | `<cmd>`, with `TELEGRAM_SESSION_PID` set to the session to close |
 | `TELEGRAM_SESSION_INFO_CMD` | `<cmd>`, per session; prints JSON with optional `model` and `status` (`busy`/`idle`), used for the labels and `/sessions` |
 | `TELEGRAM_AUTONAME_CMD` | `<cmd> <session id>`, per unnamed session; prints a short name or nothing |
+| `TELEGRAM_LOGIN_CMD` | Run through a shell in a pseudo-terminal (`script`); the first URL it prints is sent with a reply prompt, the reply is typed in, exit 0 = signed in |
 
 The relay's commands work with no session open. It logs to `relay.log` in the
 state directory. A new `relay.ts` replaces the running relay when the first
