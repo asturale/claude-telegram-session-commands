@@ -27,7 +27,9 @@
  *   /new [#name] [prompt]  `TELEGRAM_NEW_CMD <model> [prompt]` on TELEGRAM_DEFAULT_MODEL,
  *                      named `name` when it connects
  *                      (with TELEGRAM_NEW_MODEL_MENU=1: pick a model first)
- *   /close             close the active session (`TELEGRAM_CLOSE_CMD`)
+ *   /close [n]         close the active session or session n (`TELEGRAM_CLOSE_CMD`)
+ *   /switch [n]        switch to session n (no number: the list)
+ *   /progress n, /stop n   handed to session n (without a number: the active one)
  *   /name [name]       name the active session (empty: back to the model name)
  *   /recap [n|all]     `TELEGRAM_RECAP_CMD <session id>` for the active session,
  *                      session n or all of them: a few lines on where it stands
@@ -130,7 +132,7 @@ function onLines(sock: Socket, handle: (msg: Msg) => void): void {
 type MenuItem = { command: string; description: string; help: string }
 
 // Bot menu: daily use, managing the session, settings, information, rarely.
-const MENU_ORDER = 'sessions,new,progress,recap,stop,btw,' +
+const MENU_ORDER = 'sessions,switch,new,progress,recap,stop,btw,' +
   'clear,resume,name,close,compact,reload,' +
   'model,effort,mode,skill,' +
   'status,usage,tasks,remember,' +
@@ -149,7 +151,8 @@ export function startRelayClient(o: {
   o.menu.push(
     { command: 'sessions', description: 'Open sessions: switch or close', help: '/sessions — open sessions: switch or close' },
     { command: 'new', description: 'Open an extra session', help: '/new [prompt] — open an extra session' },
-    { command: 'close', description: 'Close the active session', help: '/close — close the active session' },
+    { command: 'switch', description: 'Switch to another session', help: '/switch [n] — switch to session n (no number: the list)' },
+    { command: 'close', description: 'Close the active session', help: '/close [n] — close the active session, or session n' },
     { command: 'name', description: 'Name the active session', help: '/name [name] — name the active session (empty: model name)' },
     ...(process.env.TELEGRAM_RECAP_CMD ? [{ command: 'recap', description: 'Where a session stands, in a few lines', help: '/recap [n|all] — where the active session (n, or all) stands, in a few lines' }] : []),
     ...(process.env.TELEGRAM_LOGIN_CMD ? [{ command: 'login', description: 'Sign Claude Code in again', help: '/login — sign Claude Code in again (link, then send the code back)' }] : []),
@@ -674,12 +677,52 @@ async function runRelay(): Promise<void> {
     await Promise.all(targets.map(c => recap(chat, c)))
   }
 
+  // Hand a session a command of its own (/progress, /stop), without making it
+  // the active session. `u` is the update it answers (message or button tap).
+  const forward = (c: Client, u: Update, command: string) => {
+    const q = u.callback_query
+    const m = u.message
+    writeLine(c.sock, { t: 'update', update: {
+      update_id: u.update_id,
+      message: {
+        message_id: m?.message_id ?? q?.message?.message_id ?? 0, date: Math.floor(Date.now() / 1000),
+        chat: m?.chat ?? q?.message?.chat ?? { id: q!.from.id, type: 'private' },
+        from: m?.from ?? q!.from, text: command, entities: [{ type: 'bot_command', offset: 0, length: command.length }],
+      },
+    } })
+  }
+
   const handleCommand = async (u: Update): Promise<boolean> => {
     const m = u.message
     if (!m || m.chat.type !== 'private' || !owner(m.from?.id)) return false
-    const cm = /^\/(sessions|new|close|name|login|recap)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(m.text ?? '')
+    const cm = /^\/(sessions|new|close|name|login|recap|switch|progress|stop)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(m.text ?? '')
     if (!cm) return false
     const chat = String(m.chat.id)
+    const arg = (cm[2] ?? '').trim()
+    // A session number: /switch 2, /progress 2, /stop 2, /close 2.
+    const num = /^#?(\d+)$/.exec(arg)
+    const target = num ? clients.find(c => c.slot === Number(num[1]) && !c.replaced) ?? null : null
+    const noSuch = () => api.sendMessage(chat, `No session ${num![1]}. See /sessions.`).catch(() => {})
+    if (cm[1] === 'progress' || cm[1] === 'stop') {
+      if (!num) return false // the active session handles it
+      if (target) forward(target, u, `/${cm[1]}`)
+      else await noSuch()
+      return true
+    }
+    if (cm[1] === 'switch') {
+      if (!num) await sessionsList(chat)
+      else if (!target) await noSuch()
+      else {
+        setActive(target)
+        await api.sendMessage(chat, `→ Now talking to ${label(target)}.`).catch(() => {})
+      }
+      return true
+    }
+    if (cm[1] === 'close' && num) {
+      if (target) await askClose(chat, target)
+      else await noSuch()
+      return true
+    }
     if (cm[1] === 'sessions') await sessionsList(chat)
     else if (cm[1] === 'recap') await recapCommand(chat, (cm[2] ?? '').trim())
     else if (cm[1] === 'login') await startLogin(chat)
@@ -726,14 +769,7 @@ async function runRelay(): Promise<void> {
           break
         }
         await answer(`Following ${label(c)}`)
-        // A /progress of its own, without making it the active session.
-        writeLine(c.sock, { t: 'update', update: {
-          update_id: u.update_id,
-          message: {
-            message_id: msgId ?? 0, date: Math.floor(Date.now() / 1000), chat: q.message?.chat ?? { id: q.from.id, type: 'private' },
-            from: q.from, text: '/progress', entities: [{ type: 'bot_command', offset: 0, length: 9 }],
-          },
-        } })
+        forward(c, u, '/progress')
         break
       case 'recap':
         if (!c || !RECAP_CMD) {

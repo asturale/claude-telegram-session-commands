@@ -180,13 +180,14 @@ Bot API itself.
 | --- | --- | --- |
 | `/sessions` | Open sessions as buttons: tap one to switch to it, 📈 to follow it with `/progress` without switching, ✕ to close it | `TELEGRAM_SESSION_INFO_CMD` (optional) |
 | `/new [#name] [prompt]` | Open an extra session next to the others, on `TELEGRAM_DEFAULT_MODEL` (or the first `TELEGRAM_MODELS` entry); `#mail` names it right away; with `TELEGRAM_NEW_MODEL_MENU=1`, pick a model first | `TELEGRAM_NEW_CMD`, `TELEGRAM_MODELS` |
-| `/close` | Close the active session, after a confirmation | `TELEGRAM_CLOSE_CMD` |
+| `/switch [n]` | Switch to session n; without a number, the session list | — |
+| `/close [n]` | Close the active session (or session n), after a confirmation | `TELEGRAM_CLOSE_CMD` |
 | `/name [name]` | Name the active session, so its label reads `2·mail` instead of `2·sonnet`; no name goes back to the model | — |
 | `/recap [n\|all]` | A few lines on where the active session (session n, or every session) stands; also 📝 in `/sessions`. Run by the relay: nothing switches and a busy session isn't disturbed | `TELEGRAM_RECAP_CMD` |
 | `/login` | Sign Claude Code in again from the chat: the relay runs the login command in a pseudo-terminal, sends you its sign-in link and types in the code you send back as a reply. Works while every session is stuck on `/login` | `TELEGRAM_LOGIN_CMD` (for example `claude auth login`) |
 
 - The bot menu lists the most used commands first: `/sessions`, `/new`,
-  `/progress`, `/recap`, `/stop`, `/btw`, then managing the session, settings,
+  `/switch`, `/progress`, `/recap`, `/stop`, `/btw`, then managing the session, settings,
   information, and `/login`, `/help`, `/start` last. `TELEGRAM_MENU_ORDER`
   (comma-separated) sets your own order; commands it leaves out follow.
 - Plain messages go to the active session. A swipe-reply goes to the session
@@ -200,7 +201,8 @@ Bot API itself.
 - Permission replies (`yes abcde`) go to all sessions. Only the one that asked
   knows the code.
 - The other commands (`/stop`, `/model`, `/progress`, …) act on the active
-  session. Their scripts get `TELEGRAM_SESSION_PID`, the server pid of that
+  session. `/progress 2` and `/stop 2` act on session 2 instead, without
+  switching. Their scripts get `TELEGRAM_SESSION_PID`, the server pid of that
   session. Use it instead of `bot.pid` to find the session. `bot.pid` holds the
   active session's server pid, so scripts that don't know about the relay act on
   the active session.
