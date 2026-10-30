@@ -29,6 +29,8 @@
  *                      (with TELEGRAM_NEW_MODEL_MENU=1: pick a model first)
  *   /close             close the active session (`TELEGRAM_CLOSE_CMD`)
  *   /name [name]       name the active session (empty: back to the model name)
+ *   /recap [n|all]     `TELEGRAM_RECAP_CMD <session id>` for the active session,
+ *                      session n or all of them: a few lines on where it stands
  *   /login             run TELEGRAM_LOGIN_CMD (`claude auth login`) in a
  *                      pseudo-terminal: its sign-in link goes to the chat, the
  *                      code you send back (as a reply) is typed in
@@ -128,7 +130,7 @@ function onLines(sock: Socket, handle: (msg: Msg) => void): void {
 type MenuItem = { command: string; description: string; help: string }
 
 // Bot menu: daily use, managing the session, settings, information, rarely.
-const MENU_ORDER = 'sessions,new,progress,stop,btw,' +
+const MENU_ORDER = 'sessions,new,progress,recap,stop,btw,' +
   'clear,resume,name,close,compact,reload,' +
   'model,effort,mode,skill,' +
   'status,usage,tasks,remember,' +
@@ -149,6 +151,7 @@ export function startRelayClient(o: {
     { command: 'new', description: 'Open an extra session', help: '/new [prompt] — open an extra session' },
     { command: 'close', description: 'Close the active session', help: '/close — close the active session' },
     { command: 'name', description: 'Name the active session', help: '/name [name] — name the active session (empty: model name)' },
+    ...(process.env.TELEGRAM_RECAP_CMD ? [{ command: 'recap', description: 'Where a session stands, in a few lines', help: '/recap [n|all] — where the active session (n, or all) stands, in a few lines' }] : []),
     ...(process.env.TELEGRAM_LOGIN_CMD ? [{ command: 'login', description: 'Sign Claude Code in again', help: '/login — sign Claude Code in again (link, then send the code back)' }] : []),
   )
 
@@ -286,6 +289,7 @@ async function runRelay(): Promise<void> {
   const INFO_CMD = process.env.TELEGRAM_SESSION_INFO_CMD
   const PIN_CMD = process.env.TELEGRAM_PIN_CMD
   const PROGRESS = !!process.env.TELEGRAM_PROGRESS_CMD // handled by server.ts
+  const RECAP_CMD = process.env.TELEGRAM_RECAP_CMD
   const LOGIN_CMD = process.env.TELEGRAM_LOGIN_CMD
   const REPLY_SWITCHES = process.env.TELEGRAM_REPLY_SWITCHES === '1'
   const LOGIN_MS = 10 * 60_000
@@ -522,10 +526,11 @@ async function runRelay(): Promise<void> {
         callback_data: `relay:use:${c.pid}`,
       },
       ...(PROGRESS ? [{ text: '📈', callback_data: `relay:progress:${c.pid}` }] : []),
+      ...(RECAP_CMD ? [{ text: '📝', callback_data: `relay:recap:${c.pid}` }] : []),
       { text: '✕', callback_data: `relay:ask:${c.pid}` },
     ])
     if (NEW_CMD) rows.push([{ text: '+ New session', callback_data: 'relay:newmenu' }])
-    await api.sendMessage(chat, `Sessions (● = active). Tap to switch${PROGRESS ? ', 📈 to follow without switching' : ''}, ✕ to close:`, {
+    await api.sendMessage(chat, `Sessions (● = active). Tap to switch${PROGRESS ? ', 📈 to follow' : ''}${RECAP_CMD ? ', 📝 for a recap' : ''}, ✕ to close:`, {
       reply_markup: { inline_keyboard: rows },
     }).catch(e => log(`sessions failed: ${e}`))
   }
@@ -643,13 +648,40 @@ async function runRelay(): Promise<void> {
     return true
   }
 
+  // /recap: RECAP_CMD <session id> prints a few lines on where a session
+  // stands. Run here, so a busy session isn't disturbed and nothing switches.
+  const recap = async (chat: string, c: Client) => {
+    const sent = await api.sendMessage(chat, `⏳ Recap of ${label(c)}…`).catch(() => null)
+    const out = c.sessionId ? (await runWith(RECAP_CMD!, [c.sessionId], c.pid, false, 120000)).trim() : ''
+    const text = `📝 ${label(c)}\n${out || '(no recap: nothing to summarize yet, or it failed)'}`
+    if (sent) await api.editMessageText(chat, sent.message_id, text).catch(() => {})
+    else await api.sendMessage(chat, text).catch(() => {})
+  }
+
+  const recapCommand = async (chat: string, arg: string) => {
+    if (!RECAP_CMD) {
+      await api.sendMessage(chat, '/recap is not configured (TELEGRAM_RECAP_CMD).').catch(() => {})
+      return
+    }
+    const sorted = [...clients].sort((a, b) => a.slot - b.slot)
+    const targets = !arg ? (active ? [active] : [])
+      : /^all$/i.test(arg) ? sorted
+      : sorted.filter(c => c.slot === Number(arg.replace(/^#/, '')))
+    if (targets.length === 0) {
+      await api.sendMessage(chat, arg ? `No session ${arg}. See /sessions.` : 'No active session.').catch(() => {})
+      return
+    }
+    await Promise.all(targets.map(c => recap(chat, c)))
+  }
+
   const handleCommand = async (u: Update): Promise<boolean> => {
     const m = u.message
     if (!m || m.chat.type !== 'private' || !owner(m.from?.id)) return false
-    const cm = /^\/(sessions|new|close|name|login)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(m.text ?? '')
+    const cm = /^\/(sessions|new|close|name|login|recap)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(m.text ?? '')
     if (!cm) return false
     const chat = String(m.chat.id)
     if (cm[1] === 'sessions') await sessionsList(chat)
+    else if (cm[1] === 'recap') await recapCommand(chat, (cm[2] ?? '').trim())
     else if (cm[1] === 'login') await startLogin(chat)
     else if (cm[1] === 'new') await newMenu(chat, (cm[2] ?? '').trim())
     else if (cm[1] === 'name') await nameSession(chat, active, (cm[2] ?? '').trim())
@@ -702,6 +734,14 @@ async function runRelay(): Promise<void> {
             from: q.from, text: '/progress', entities: [{ type: 'bot_command', offset: 0, length: 9 }],
           },
         } })
+        break
+      case 'recap':
+        if (!c || !RECAP_CMD) {
+          await answer(c ? 'Not configured (TELEGRAM_RECAP_CMD).' : 'That session is closed.')
+          break
+        }
+        await answer(`Recap of ${label(c)}`)
+        void recap(chat, c)
         break
       case 'close':
         if (!c) {

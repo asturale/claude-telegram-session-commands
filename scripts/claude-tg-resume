@@ -6,6 +6,7 @@
   claude-tg-resume use-<pid>     switch to an open relay session
   claude-tg-resume name <id>     a short name for an open session, or nothing
                                  while its topic is unclear (claude-tg-autoname)
+  claude-tg-resume recap <id>    a few lines on where a session stands (claude-tg-recap)
 
 With the relay, the other open sessions come first (● label). Then the
 conversations from the project of CLAUDE_TG_CWD (default: your home directory)
@@ -107,8 +108,9 @@ def first_prompt(path):
     return None
 
 
-def excerpt(path, limit=4000):
-    """The user's requests and the Telegram replies, as input for the summary."""
+def excerpt(path, limit=4000, part=300, recent=False):
+    """The user's requests and the Telegram replies, as input for the summary.
+    Too long: the beginning and the end, mostly the end when `recent`."""
     parts = []
     with open(path, "rb") as fh:
         for line in fh:
@@ -125,21 +127,22 @@ def excerpt(path, limit=4000):
                 for x in content:
                     if x.get("type") == "tool_use" and x.get("name", "").endswith("__reply"):
                         parts.append("Claude: " + str((x.get("input") or {}).get("text", "")))
-    parts = [re.sub(r"\s+", " ", p).strip()[:300] for p in parts if p.strip()]
+    parts = [re.sub(r"\s+", " ", p).strip()[:part] for p in parts if p.strip()]
     text = "\n".join(parts)
     if len(text) > limit:  # beginning and end: that's where the topic and the outcome are
-        text = text[:limit * 2 // 3] + "\n…\n" + text[-limit // 3:]
+        head = limit // 4 if recent else limit * 2 // 3
+        text = text[:head] + "\n…\n" + text[-(limit - head):]
     return text
 
 
-def summarize(path, ask=None, limit=LABEL_MAX):
-    """One line about the topic, from a headless call without plugins, hooks,
-    MCP servers, tools or a saved transcript."""
+def summarize(path, ask=None, limit=LABEL_MAX, lines=1, timeout=None, text=None):
+    """One line about the topic (or up to `lines` lines), from a headless call
+    without plugins, hooks, MCP servers, tools or a saved transcript."""
     ask = ask or (f"Give its topic in one short line of at most {LABEL_MAX - 12} characters, in the "
                   "language of the conversation, without quotes, full stop or introduction. "
                   "Only that line.")
     prompt = ("Below is a Claude Code conversation (the user's requests, Claude's replies). "
-              + ask + "\n\n" + excerpt(path))
+              + ask + "\n\n" + (text or excerpt(path)))
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("CLAUDE_CODE_", "TELEGRAM_")) and k not in ("CLAUDECODE", "CLAUDE_PID")}
     env.update(env_file())  # the long-lived token, like the background sessions
@@ -150,12 +153,14 @@ def summarize(path, ask=None, limit=LABEL_MAX):
                             "--settings", '{"enabledPlugins":{"telegram@claude-plugins-official":false}}',
                             "--strict-mcp-config", "--no-session-persistence", "--disable-slash-commands",
                             "--tools", ""], input=prompt, capture_output=True, text=True,
-                           timeout=TITLE_WAIT, cwd=cwd, env=env)
+                           timeout=timeout or TITLE_WAIT, cwd=cwd, env=env)
     except (OSError, subprocess.TimeoutExpired):
         return None
     t = (r.stdout or "").strip().splitlines()
     if r.returncode or not t:
         return None
+    if lines > 1:
+        return "\n".join(l.rstrip() for l in t[:lines] if l.strip())[:limit]
     return t[0].strip(" .\"'*")[:limit]
 
 
@@ -239,6 +244,23 @@ if sys.argv[1] == "name":
         subprocess.run(["rm", "-rf", str(project_dir(TITLES.parent / "titles"))])
         if n and n.strip("-"):
             print(n)
+    sys.exit(0)
+
+if sys.argv[1] == "recap":
+    # claude-tg-recap: where an open session stands, in a few lines.
+    f = next((HOME / ".claude/projects").glob(f"*/{sys.argv[2] if len(sys.argv) > 2 else '-'}.jsonl"), None)
+    if not f:
+        sys.exit(0)
+    TITLE_MODEL = setting("CLAUDE_TG_RECAP_MODEL", TITLE_MODEL or "haiku")
+    r = summarize(f, "Recap it for the user, who wants to know at a glance where this session stands. "
+                     "Write 3 to 5 short lines, each starting with \"• \", in the language of the "
+                     "conversation: what it is about, what has been done, and what is still open or "
+                     "waiting for the user (say so explicitly if something waits for them). Plain "
+                     "text, no markdown, no introduction. Only the lines.",
+                  limit=1200, lines=8, timeout=90, text=excerpt(f, limit=12000, part=600, recent=True))
+    subprocess.run(["rm", "-rf", str(project_dir(TITLES.parent / "titles"))])
+    if r:
+        print(r)
     sys.exit(0)
 
 if sys.argv[1] != "list":
