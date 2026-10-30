@@ -79,7 +79,14 @@ const STATE_FILE = join(STATE_DIR, 'relay-state.json')
 const NAMES_FILE = join(STATE_DIR, 'session-names.json')
 const HANDOVER_MS = 120_000
 const RELAY_PATH = import.meta.path
-const VERSION = createHash('sha256').update(readFileSync(RELAY_PATH)).digest('hex').slice(0, 12)
+const diskVersion = () => {
+  try {
+    return createHash('sha256').update(readFileSync(RELAY_PATH)).digest('hex').slice(0, 12)
+  } catch {
+    return ''
+  }
+}
+const VERSION = diskVersion()
 
 type Msg = Record<string, any>
 
@@ -690,9 +697,16 @@ async function runRelay(): Promise<void> {
         sock.end()
       } else if (msg.t === 'hello') {
         if (msg.version !== VERSION) {
-          // A session runs a newer (or older) relay.ts: make way for it.
-          void shutdown(`version ${msg.version} connected, mine is ${VERSION}`)
-          return
+          // Versions differ. Only make way if relay.ts on disk changed since
+          // this relay started: the session respawns it from the new file.
+          // If this relay already matches the disk, the session is the stale
+          // one (it loaded relay.ts before an update) and would just respawn
+          // this same version, so restarting would loop forever: keep it.
+          if (diskVersion() !== VERSION) {
+            void shutdown(`version ${msg.version} connected, mine is ${VERSION}`)
+            return
+          }
+          log(`session pid ${msg.pid} runs older relay.ts ${msg.version}, keeping ${VERSION}`)
         }
         let slot = 0
         let inherited: Client | null = null
