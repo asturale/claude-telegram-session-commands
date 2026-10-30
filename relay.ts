@@ -25,7 +25,8 @@
  *   /sessions          list sessions; tap one to switch, ✕ to close it, 📈 to
  *                      run /progress in it without switching
  *   /new [#name] [prompt]  `TELEGRAM_NEW_CMD <model> [prompt]` on TELEGRAM_DEFAULT_MODEL,
- *                      named `name` when it connects
+ *                      named `name` when it connects; a photo or file captioned
+ *                      /new … is handed to the new session once it connects
  *                      (with TELEGRAM_NEW_MODEL_MENU=1: pick a model first)
  *   /close [n]         close the active session or session n (`TELEGRAM_CLOSE_CMD`)
  *   /switch [n]        switch to session n (no number: the list)
@@ -322,8 +323,9 @@ async function runRelay(): Promise<void> {
   let lastAutoNew = 0
   const NEW_MODEL_MENU = process.env.TELEGRAM_NEW_MODEL_MENU === '1'
   const READY_MS = 180_000 // a /new session that connects within this is announced
-  // Sessions /new is opening: named on connect, announced if they have no prompt.
-  let expectReady: { model: string, until: number, name?: string, announce: boolean }[] = []
+  // Sessions /new is opening: named on connect, announced if they have no prompt,
+  // handed `update` (a photo or file captioned /new …) once they're there.
+  let expectReady: { model: string, until: number, name?: string, announce: boolean, update?: Update }[] = []
 
   // One relay at a time.
   try {
@@ -365,7 +367,7 @@ async function runRelay(): Promise<void> {
   let offset = 0
   let exiting = false
   const owners = new Map<string, number>(restart?.owners ?? []) // `${chat}:${message_id}` → client pid
-  const pendingNew = new Map<string, string>() // `${chat}:${message_id}` → prompt
+  const pendingNew = new Map<string, { prompt: string, update?: Update }>() // `${chat}:${message_id}` →
   let waiting: Update[] = []
   let waitTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -529,15 +531,18 @@ async function runRelay(): Promise<void> {
       return
     }
     await Promise.race([Promise.all(clients.map(refresh)), new Promise(r => setTimeout(r, 10000))])
-    const rows = [...clients].sort((a, b) => a.slot - b.slot).map(c => [
+    // The name gets a full-width row of its own, the actions a row below it:
+    // squeezed next to three buttons, names were cut off after a few letters.
+    const rows = [...clients].sort((a, b) => a.slot - b.slot).flatMap(c => [[
       {
         text: `${c === active ? '● ' : ''}${label(c)}${c.name && c.model ? ` (${shortModel(c.model)})` : ''}${c.status ? ` · ${statusText(c)}` : ''}`,
         callback_data: `relay:use:${c.pid}`,
       },
+    ], [
       ...(PROGRESS ? [{ text: '📈', callback_data: `relay:progress:${c.pid}` }] : []),
       ...(RECAP_CMD ? [{ text: '📝', callback_data: `relay:recap:${c.pid}` }] : []),
       { text: '✕', callback_data: `relay:ask:${c.pid}` },
-    ])
+    ]])
     if (NEW_CMD) rows.push([{ text: '+ New session', callback_data: 'relay:newmenu' }])
     await api.sendMessage(chat, `Sessions (● = active). Tap to switch${PROGRESS ? ', 📈 to follow' : ''}${RECAP_CMD ? ', 📝 for a recap' : ''}, ✕ to close:`, {
       reply_markup: { inline_keyboard: rows },
@@ -546,30 +551,39 @@ async function runRelay(): Promise<void> {
 
   const modelLabel = (value: string) => MODELS.find(x => x.value === value)?.label ?? value
 
-  // `text` is what followed /new: an optional #name, then the prompt.
-  const startNew = (model: string, text: string) => {
+  // `text` is what followed /new: an optional #name, then the prompt. With
+  // `update` (a photo or file), the prompt is its caption instead: the session
+  // gets the whole message once it connects.
+  const startNew = (model: string, text: string, update?: Update) => {
     const nm = /^#(\S+)\s*([\s\S]*)$/.exec(text.trim())
     const name = nm ? nm[1].slice(0, 24) : undefined
     const prompt = (nm ? nm[2] : text).trim()
+    if (update?.message) {
+      const msg: Record<string, unknown> = { ...update.message }
+      if (prompt) msg.caption = prompt
+      else delete msg.caption
+      delete msg.caption_entities
+      update = { ...update, message: msg } as Update
+    }
     // Without a prompt the session has nothing to say: announce it on connect.
-    expectReady.push({ model, until: Date.now() + READY_MS, name, announce: !prompt })
-    void runWith(NEW_CMD!, prompt ? [model, prompt] : [model], active?.pid, true)
+    expectReady.push({ model, until: Date.now() + READY_MS, name, announce: !prompt && !update, update })
+    void runWith(NEW_CMD!, prompt && !update ? [model, prompt] : [model], active?.pid, true)
   }
 
-  const newMenu = async (chat: string, prompt: string) => {
+  const newMenu = async (chat: string, prompt: string, update?: Update) => {
     if (!NEW_CMD) {
       await api.sendMessage(chat, '/new is not configured (TELEGRAM_NEW_CMD).').catch(() => {})
       return
     }
     if (!NEW_MODEL_MENU && DEFAULT_MODEL) {
       await api.sendMessage(chat, `Opening a new session on ${modelLabel(DEFAULT_MODEL)}…`).catch(() => {})
-      startNew(DEFAULT_MODEL, prompt)
+      startNew(DEFAULT_MODEL, prompt, update)
       return
     }
     const sent = await api.sendMessage(chat, 'Open a new session on:', {
       reply_markup: { inline_keyboard: [MODELS.map((m, i) => ({ text: m.label, callback_data: `relay:new:${i}` }))] },
     }).catch(() => null)
-    if (sent && prompt) pendingNew.set(`${chat}:${sent.message_id}`, prompt)
+    if (sent && (prompt || update)) pendingNew.set(`${chat}:${sent.message_id}`, { prompt, update })
   }
 
   const askClose = async (chat: string, c: Client | null) => {
@@ -739,6 +753,12 @@ async function runRelay(): Promise<void> {
   const handleCommand = async (u: Update): Promise<boolean> => {
     const m = u.message
     if (!m || m.chat.type !== 'private' || !owner(m.from?.id)) return false
+    // A photo or file captioned /new …: opens a session that gets it.
+    const cn = m.text == null ? /^\/new(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(m.caption ?? '') : null
+    if (cn) {
+      await newMenu(String(m.chat.id), (cn[1] ?? '').trim(), u)
+      return true
+    }
     const cm = /^\/(sessions|new|close|name|login|recap|switch|progress|stop)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(m.text ?? '')
     if (!cm) return false
     const chat = String(m.chat.id)
@@ -859,11 +879,11 @@ async function runRelay(): Promise<void> {
           break
         }
         const key = `${chat}:${msgId}`
-        const prompt = pendingNew.get(key)
+        const pending = pendingNew.get(key)
         pendingNew.delete(key)
         await answer(`Starting ${model.label}…`)
         await edit(`Opening a new session on ${model.label}…`)
-        startNew(model.value, prompt ?? '')
+        startNew(model.value, pending?.prompt ?? '', pending?.update)
         break
       }
       default:
@@ -1044,6 +1064,7 @@ async function runRelay(): Promise<void> {
         flushWaiting()
         const c = client
         if (ready?.announce) notify(`Session ${label(c)} is ready (${modelLabel(ready.model)}).`)
+        if (ready?.update) deliver(c, ready.update)
         for (const ms of [0, 5000, 20000, 60000]) setTimeout(() => void refresh(c), ms)
       } else if (msg.t === 'sent' && client) {
         owners.set(`${msg.chat}:${msg.id}`, client.pid)
