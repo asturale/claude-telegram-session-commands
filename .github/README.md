@@ -182,7 +182,8 @@ Bot API itself.
 | `/new [#name] [prompt]` | Open an extra session next to the others, on `TELEGRAM_DEFAULT_MODEL` (or the first `TELEGRAM_MODELS` entry); `#mail` names it right away; with `TELEGRAM_NEW_MODEL_MENU=1`, pick a model first | `TELEGRAM_NEW_CMD`, `TELEGRAM_MODELS` |
 | `/switch [n]` | Switch to session n; without a number, the session list | — |
 | `/close [n]` | Close the active session (or session n), after a confirmation | `TELEGRAM_CLOSE_CMD` |
-| `/name [name]` | Name the active session, so its label reads `2·mail` instead of `2·sonnet`; no name goes back to the model | — |
+| `/name [n] [name]` | Name the active session (or session n), so its label reads `2·mail` instead of `2·sonnet`; no name goes back to the model | — |
+| `/2 [text]` | Send text to session 2 only, without switching; a photo or file whose caption starts with `/2` goes there too. `/2` alone switches to session 2 | — |
 | `/recap [n\|all]` | A few lines on where the active session (session n, or every session) stands; also 📝 in `/sessions`. Run by the relay: nothing switches and a busy session isn't disturbed | `TELEGRAM_RECAP_CMD` |
 | `/login` | Sign Claude Code in again from the chat: the relay runs the login command in a pseudo-terminal, sends you its sign-in link and types in the code you send back as a reply. Works while every session is stuck on `/login` | `TELEGRAM_LOGIN_CMD` (for example `claude auth login`) |
 
