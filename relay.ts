@@ -274,6 +274,7 @@ async function runRelay(): Promise<void> {
   const PIN_CMD = process.env.TELEGRAM_PIN_CMD
   const PROGRESS = !!process.env.TELEGRAM_PROGRESS_CMD // handled by server.ts
   const LOGIN_CMD = process.env.TELEGRAM_LOGIN_CMD
+  const REPLY_SWITCHES = process.env.TELEGRAM_REPLY_SWITCHES === '1'
   const LOGIN_MS = 10 * 60_000
   const AUTONAME_CMD = process.env.TELEGRAM_AUTONAME_CMD
   const AUTONAME_MS = 60_000 // after a message, wait this long before naming
@@ -757,7 +758,8 @@ async function runRelay(): Promise<void> {
       const r = m.reply_to_message
       const c = (pid != null ? byPid(pid) : null) ?? bySlotTag('text' in r ? r.text : r.caption)
       if (c) {
-        if (c !== active && m.chat.type === 'private' && owner(m.from?.id)) setActive(c)
+        // A reply is a side remark: the active session stays, unless configured otherwise.
+        if (REPLY_SWITCHES && c !== active && m.chat.type === 'private' && owner(m.from?.id)) setActive(c)
         deliver(c, u)
         return
       }
