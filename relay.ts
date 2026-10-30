@@ -30,7 +30,9 @@
  *   /close [n]         close the active session or session n (`TELEGRAM_CLOSE_CMD`)
  *   /switch [n]        switch to session n (no number: the list)
  *   /progress n, /stop n   handed to session n (without a number: the active one)
- *   /name [name]       name the active session (empty: back to the model name)
+ *   /name [n] [name]   name the active session or session n (empty: back to the model name)
+ *   /2 [text]          text (or a photo or file captioned /2 …) to session 2 only,
+ *                      without switching; /2 alone switches to it
  *   /recap [n|all]     `TELEGRAM_RECAP_CMD <session id>` for the active session,
  *                      session n or all of them: a few lines on where it stands
  *   /login             run TELEGRAM_LOGIN_CMD (`claude auth login`) in a
@@ -692,6 +694,44 @@ async function runRelay(): Promise<void> {
     } })
   }
 
+  // /2 text (or a photo or file with /2 at the start of its caption): to
+  // session 2 only, without switching. /2 alone switches to session 2.
+  const handleShortcut = async (u: Update): Promise<boolean> => {
+    const m = u.message
+    if (!m || m.chat.type !== 'private' || !owner(m.from?.id)) return false
+    const isText = m.text != null
+    const body = isText ? m.text! : m.caption ?? ''
+    const sc = /^\/(\d+)(?:@\w+)?(?:\s+|$)/.exec(body)
+    if (!sc) return false
+    const chat = String(m.chat.id)
+    const c = clients.find(x => x.slot === Number(sc[1]) && !x.replaced)
+    if (!c) {
+      await api.sendMessage(chat, `No session ${sc[1]}. See /sessions.`).catch(() => {})
+      return true
+    }
+    const rest = body.slice(sc[0].length)
+    if (isText && !rest.trim()) {
+      setActive(c)
+      await api.sendMessage(chat, `→ Now talking to ${label(c)}.`).catch(() => {})
+      return true
+    }
+    // Hand it on without the /2, entities shifted to match.
+    const cut = sc[0].length
+    const shift = (es?: { offset: number, length: number, type: string }[]) =>
+      es?.filter(e => e.offset >= cut).map(e => ({ ...e, offset: e.offset - cut }))
+    const msg: Record<string, unknown> = { ...m }
+    if (isText) {
+      msg.text = rest
+      msg.entities = shift(m.entities)
+    } else {
+      if (rest) msg.caption = rest
+      else delete msg.caption
+      msg.caption_entities = shift(m.caption_entities)
+    }
+    deliver(c, { ...u, message: msg } as Update)
+    return true
+  }
+
   const handleCommand = async (u: Update): Promise<boolean> => {
     const m = u.message
     if (!m || m.chat.type !== 'private' || !owner(m.from?.id)) return false
@@ -727,7 +767,13 @@ async function runRelay(): Promise<void> {
     else if (cm[1] === 'recap') await recapCommand(chat, (cm[2] ?? '').trim())
     else if (cm[1] === 'login') await startLogin(chat)
     else if (cm[1] === 'new') await newMenu(chat, (cm[2] ?? '').trim())
-    else if (cm[1] === 'name') await nameSession(chat, active, (cm[2] ?? '').trim())
+    else if (cm[1] === 'name') {
+      // /name 6 mail: session 6 (/name 6 alone: back to its model name).
+      const nm = /^#?(\d+)(?:\s+([\s\S]*))?$/.exec(arg)
+      const c = nm ? clients.find(x => x.slot === Number(nm[1]) && !x.replaced) ?? null : active
+      if (nm && !c) await api.sendMessage(chat, `No session ${nm[1]}. See /sessions.`).catch(() => {})
+      else await nameSession(chat, c, nm ? (nm[2] ?? '').trim() : arg)
+    }
     else await askClose(chat, active)
     return true
   }
@@ -827,6 +873,7 @@ async function runRelay(): Promise<void> {
   const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 
   const route = async (u: Update) => {
+    if (await handleShortcut(u)) return
     if (await handleCommand(u)) return
     if (handleLoginCode(u)) return
     if (await handleCallback(u)) return
