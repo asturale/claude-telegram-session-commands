@@ -7,6 +7,10 @@
   claude-tg-resume name <id>     a short name for an open session, or nothing
                                  while its topic is unclear (claude-tg-autoname)
   claude-tg-resume recap <id>    a few lines on where a session stands (claude-tg-recap)
+  claude-tg-resume list cloud[:n]  the claude.ai sessions that aren't archived (needs a
+                                 full `claude auth login`, not a long-lived token)
+  claude-tg-resume cloud-<id>    copy that claude.ai conversation and continue it in a
+                                 new session (claude-tg-session import)
 
 With the relay, the other open sessions come first (● label). Then the
 conversations from the project of CLAUDE_TG_CWD (default: your home directory)
@@ -14,9 +18,10 @@ that contain a real request; side tasks and open sessions are left out. A name
 set with /name wins; otherwise the label is a one-line summary of the topic
 (CLAUDE_TG_TITLE_MODEL, run headless and cached), or the first request until
 that summary exists. Set CLAUDE_TG_TITLE_MODEL to an empty value to turn the
-summaries off.
+summaries off. The first page ends with a button to the claude.ai sessions
+(☁ cloud session, ● Remote Control session that is connected, ○ one that isn't).
 """
-import json, os, re, socket, subprocess, sys
+import json, os, re, socket, subprocess, sys, urllib.error, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +32,10 @@ os.environ["PATH"] = f"{here}:{HOME}/.local/bin:" + os.environ.get("PATH", "")
 ENV_FILE = HOME / ".config/claude-tg.env"
 TG = Path(os.environ.get("TELEGRAM_STATE_DIR") or HOME / ".claude/channels/telegram")
 TITLES = HOME / ".local/state/claude-tg/resume-titles.json"
+CLOUD_DIR = HOME / ".local/state/claude-tg/cloud"  # copied claude.ai conversations
+# Remote Control's automatic session name: "<host>-<adjective>-<noun>".
+AUTO_TITLE = re.compile(r"^([A-Za-z0-9.]+)-[a-z]+-[a-z]+$")
+CLOUD_TEXT_MAX = 60_000  # characters of a claude.ai conversation in the copy
 SHOW = 6
 HEAD_BYTES = 400_000
 TITLE_WAIT = 20          # seconds; the plugin waits at most 30 s for `list`
@@ -39,7 +48,8 @@ STARTUP = ("Started via /clear from Telegram. Send",
            "Extra session opened via /new in Telegram, next to the existing ones. Send",
            "Extra session opened via /new in Telegram, next to the existing ones. The relay",
            "Model switched to ", "Permission mode switched to ", "Effort switched to ",
-           "Session reloaded via /reload", "This earlier conversation was resumed via /resume")
+           "Session reloaded via /reload", "This earlier conversation was resumed via /resume",
+           "A claude.ai session (")
 
 
 def env_file():
@@ -205,8 +215,132 @@ def prefixes(name):
     return tuple(p for p in setting(name, "").split("|") if p)
 
 
+def cloud_auth():
+    """Bearer token and organization of the claude.ai login, or None when that
+    login can't read sessions (a long-lived `setup-token` token can't)."""
+    try:
+        o = json.loads((HOME / ".claude/.credentials.json").read_text())["claudeAiOauth"]
+        org = json.loads((HOME / ".claude.json").read_text())["oauthAccount"]["organizationUuid"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if "user:sessions:claude_code" not in (o.get("scopes") or []) or not o.get("accessToken"):
+        return None
+    return o["accessToken"], org
+
+
+def cloud_get(path, **query):
+    auth = cloud_auth()
+    if not auth:
+        raise RuntimeError("no claude.ai login with session access (run /login)")
+    url = "https://api.anthropic.com" + path + ("?" + urllib.parse.urlencode(query) if query else "")
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {auth[0]}", "x-organization-uuid": auth[1],
+        "anthropic-version": "2023-06-01", "anthropic-beta": "ccr-byoc-2025-07-29"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError("login expired, run /login" if e.code == 401 else f"HTTP {e.code}") from None
+
+
+def cloud_transcript(sid, limit=CLOUD_TEXT_MAX):
+    """The conversation of a claude.ai session as "User:/Claude:" text; too long,
+    then the first part and the (more important) end."""
+    parts, after = [], None
+    for _ in range(50):
+        q = {"limit": 1000, **({"after_id": after} if after else {})}
+        d = cloud_get(f"/v1/sessions/{sid}/events", **q)
+        for e in d.get("data", []):
+            if not isinstance(e.get("message"), (dict, type(None))):
+                continue  # system notices carry a plain string
+            c = user_text(e)
+            if c is not None:
+                parts.append("User: " + c.strip())
+                continue
+            content = (e.get("message") or {}).get("content")
+            if e.get("type") != "assistant" or not isinstance(content, list):
+                continue
+            for x in content:
+                if x.get("type") == "text" and x.get("text", "").strip():
+                    parts.append("Claude: " + x["text"].strip())
+                elif x.get("type") == "tool_use":
+                    inp = x.get("input") or {}
+                    if x.get("name", "").endswith("__reply"):
+                        parts.append("Claude: " + str(inp.get("text", "")).strip())
+                    else:
+                        what = inp.get("description") or inp.get("command") or inp.get("file_path") or ""
+                        parts.append(f"[{x.get('name')}: {shorten(str(what).splitlines()[0] if what else '', 120)}]")
+        after = d.get("last_id")
+        if not d.get("has_more") or not after:
+            break
+    text = "\n\n".join(parts)
+    if len(text) > limit:
+        head = limit // 5
+        text = text[:head] + "\n\n[… middle of the conversation left out …]\n\n" + text[-(limit - head):]
+    return text
+
+
+def cloud_titles(sessions):
+    """{id: summary} for claude.ai sessions that only have an automatic name;
+    cached until the session changes, made in parallel like titles_for."""
+    cache = load(TITLES, {})
+    todo = [s for s in sessions if cache.get(s["id"], {}).get("updated") != s.get("updated_at")]
+    if todo and TITLE_MODEL:
+        def one(s):
+            text = cloud_transcript(s["id"], limit=4000)
+            return summarize(None, text=text) if text else "(empty)"
+        pool = ThreadPoolExecutor(len(todo))
+        futs = {pool.submit(one, s): s for s in todo}
+        done, _ = wait(futs, timeout=TITLE_WAIT + 1)
+        pool.shutdown(wait=False, cancel_futures=True)
+        for f in done:
+            try:
+                t = f.result()
+            except Exception:
+                t = None
+            if t:
+                cache[futs[f]["id"]] = {"title": t, "updated": futs[f].get("updated_at")}
+        TITLES.parent.mkdir(parents=True, exist_ok=True)
+        tmp = TITLES.with_suffix(".cloud.tmp")
+        tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=0))
+        tmp.replace(TITLES)
+        subprocess.run(["rm", "-rf", str(project_dir(TITLES.parent / "titles"))])
+    return {s["id"]: cache[s["id"]]["title"] for s in sessions if s["id"] in cache}
+
+
+def cloud_list(offset):
+    """Rows for the claude.ai submenu: the sessions that aren't archived, newest first."""
+    try:
+        d = cloud_get("/v1/sessions")
+    except Exception as e:
+        print(f"Can't read claude.ai sessions: {e}")
+        sys.exit(1)
+    ss = sorted((s for s in d.get("data", []) if s.get("session_status") != "archived"
+                 and s.get("id", "").startswith("session_")),
+                key=lambda s: s.get("updated_at", ""), reverse=True)
+    # Remote Control sessions that never got a message: nothing to continue.
+    cache = load(TITLES, {})
+    ss = [s for s in ss if cache.get(s["id"], {}).get("title") != "(empty)"
+          or cache[s["id"]].get("updated") != s.get("updated_at")]
+    page = ss[offset:offset + SHOW]
+    titles = cloud_titles([s for s in page if AUTO_TITLE.match(s.get("title") or "")])
+    for s in page:
+        when = datetime.fromisoformat(s["updated_at"][:19] + "+00:00").astimezone().strftime("%d %b %H:%M")
+        mark = "☁" if s.get("environment_kind") == "anthropic_cloud" else ("●" if s.get("connection_status") == "connected" else "○")
+        title = s.get("title") or (s.get("post_turn_summary") or {}).get("status_detail") or s["id"]
+        if titles.get(s["id"]):
+            topic = re.sub(r"^(Titel|Title|Onderwerp|Topic)\s*:\s*", "", titles[s["id"]])
+            title = f"{AUTO_TITLE.match(title).group(1)}: {topic}"
+        print(f"cloud-{s['id'][8:]}\t{mark} {when} {shorten(title, LABEL_MAX - 15)}")
+    print("page-0\t◂ This computer")
+    if offset:
+        print(f"page-cloud:{max(offset - SHOW, 0)}\t◂ Newer")
+    if len(ss) > offset + SHOW:
+        print(f"page-cloud:{offset + SHOW}\tOlder ▸")
+
+
 if len(sys.argv) < 2:
-    sys.exit("usage: claude-tg-resume list [n] | <session-id> | use-<pid>")
+    sys.exit("usage: claude-tg-resume list [n|cloud[:n]] | <session-id> | cloud-<id> | use-<pid>")
 
 if sys.argv[1].startswith("use-"):
     ok = False
@@ -263,11 +397,40 @@ if sys.argv[1] == "recap":
         print(r)
     sys.exit(0)
 
+if sys.argv[1].startswith("cloud-"):
+    # A claude.ai session: copy its conversation into a file and continue it in
+    # an extra session, which reads that file first.
+    sid = "session_" + sys.argv[1][6:]
+    try:
+        s = cloud_get(f"/v1/sessions/{sid}")
+        text = cloud_transcript(sid)
+    except Exception as e:
+        subprocess.run(["tg-send", f"Fetching that claude.ai session failed: {e}"])
+        sys.exit(1)
+    if not text:
+        subprocess.run(["tg-send", "That claude.ai session has no conversation yet."])
+        sys.exit(1)
+    title = s.get("title") or sid
+    auto = AUTO_TITLE.match(title)
+    if auto and load(TITLES, {}).get(sid, {}).get("title"):
+        title = f"{auto.group(1)}: {load(TITLES, {})[sid]['title']}"
+    CLOUD_DIR.mkdir(parents=True, exist_ok=True)
+    f = CLOUD_DIR / f"{sid}.md"
+    f.write_text(f"# {title}\n\nclaude.ai session {sid} ({s.get('environment_kind', '')}, "
+                 f"last updated {s.get('updated_at', '')[:16]})\nhttps://claude.ai/code/{sid}\n\n{text}\n")
+    os.execvp("claude-tg-session", ["claude-tg-session", "import", str(f), title])
+
 if sys.argv[1] != "list":
     os.execvp("claude-tg-session", ["claude-tg-session", "resume", sys.argv[1]])
 
 EXTRA_STARTUP = prefixes("CLAUDE_TG_RESUME_SKIP")
 EXTRA_SIDE_TASK = prefixes("CLAUDE_TG_RESUME_HIDE")
+if len(sys.argv) > 2 and sys.argv[2].startswith("cloud"):
+    try:
+        cloud_list(max(int(sys.argv[2].partition(":")[2] or 0), 0))
+    except ValueError:
+        cloud_list(0)
+    sys.exit(0)
 project = project_dir(setting("CLAUDE_TG_CWD", str(HOME)))
 try:
     offset = max(int(sys.argv[2]), 0) if len(sys.argv) > 2 else 0
@@ -322,3 +485,5 @@ if offset:
     print(f"page-{max(offset - SHOW, 0)}\t◂ Newer")
 if older:
     print(f"page-{offset + SHOW}\tOlder ▸")
+if not offset and cloud_auth():
+    print("open-cloud\t☁ claude.ai sessions ▸")
