@@ -34,6 +34,9 @@
  * entry); at most once a minute, and never after a crash.
  * A session opened without a prompt is announced by the relay as soon as it
  * connects, so the session itself needn't spend a turn saying it's ready.
+ * With TELEGRAM_AUTONAME_CMD, a session without a name is named after its
+ * topic: a minute after a message, `<cmd> <session id>` prints a short name, or
+ * nothing while the topic is unclear (then it tries again, up to three times).
  * Commands run with TELEGRAM_SESSION_PID set to the server.ts pid of the
  * session they concern (for /new: the active one, to copy settings from).
  * TELEGRAM_SESSION_INFO_CMD, run the same way, prints JSON with optional
@@ -232,6 +235,8 @@ type Client = {
   lastActive: number
   replaced: boolean
   closing: boolean
+  nameTries: number
+  nameTimer: ReturnType<typeof setTimeout> | null
 }
 
 async function runRelay(): Promise<void> {
@@ -252,6 +257,9 @@ async function runRelay(): Promise<void> {
   const CLOSE_CMD = process.env.TELEGRAM_CLOSE_CMD
   const INFO_CMD = process.env.TELEGRAM_SESSION_INFO_CMD
   const PIN_CMD = process.env.TELEGRAM_PIN_CMD
+  const AUTONAME_CMD = process.env.TELEGRAM_AUTONAME_CMD
+  const AUTONAME_MS = 60_000 // after a message, wait this long before naming
+  const AUTONAME_TRIES = 3
   let pinned = '' // pids last handed to PIN_CMD
   let pinTimer: ReturnType<typeof setTimeout> | null = null
   let pinning = Promise.resolve('')
@@ -382,7 +390,7 @@ async function runRelay(): Promise<void> {
     }, delay)
   }
 
-  const runWith = (cmd: string, args: string[], pid: number | undefined, detached: boolean): Promise<string> => {
+  const runWith = (cmd: string, args: string[], pid: number | undefined, detached: boolean, timeout = 20000): Promise<string> => {
     const env = { ...process.env, ...(pid ? { TELEGRAM_SESSION_PID: String(pid) } : {}) }
     if (detached) {
       const child = spawn(cmd, args, { detached: true, stdio: 'ignore', env })
@@ -391,7 +399,7 @@ async function runRelay(): Promise<void> {
       return Promise.resolve('')
     }
     return new Promise(resolve => {
-      execFile(cmd, args, { timeout: 20000, encoding: 'utf8', env }, (_err, stdout) => resolve(stdout ?? ''))
+      execFile(cmd, args, { timeout, encoding: 'utf8', env }, (_err, stdout) => resolve(stdout ?? ''))
     })
   }
 
@@ -406,7 +414,29 @@ async function runRelay(): Promise<void> {
     } catch {}
   }
 
-  const deliver = (c: Client, u: Update) => writeLine(c.sock, { t: 'update', update: u })
+  // Name a session after its topic, a while after a message: once the name
+  // command answers, or after AUTONAME_TRIES tries. A name set with /name stays.
+  const autoName = (c: Client) => {
+    if (!AUTONAME_CMD || c.name || !c.sessionId || c.nameTimer || c.nameTries >= AUTONAME_TRIES) return
+    c.nameTimer = setTimeout(async () => {
+      c.nameTimer = null
+      if (c.name || !clients.includes(c)) return
+      c.nameTries++
+      const out = await runWith(AUTONAME_CMD, [c.sessionId], c.pid, false, 60000)
+      const name = (out.trim().split('\n')[0] ?? '').replace(/\s+/g, ' ').trim().slice(0, 24)
+      if (!name || c.name || !clients.includes(c)) return
+      const before = label(c)
+      c.name = name
+      saveName(c)
+      pushState()
+      log(`session ${before} named ${label(c)}`)
+    }, AUTONAME_MS)
+  }
+
+  const deliver = (c: Client, u: Update) => {
+    writeLine(c.sock, { t: 'update', update: u })
+    if (u.message) autoName(c)
+  }
 
   const flushWaiting = () => {
     if (!active) return
@@ -688,6 +718,7 @@ async function runRelay(): Promise<void> {
           sock, pid: Number(msg.pid), slot, sessionId,
           name: inherited?.name || (sessionId && loadNames()[sessionId]) || '',
           model: inherited?.model ?? '', status: '', lastActive: Date.now(), replaced: false, closing: false,
+          nameTries: 0, nameTimer: null,
         }
         clients.push(client)
         // A fork (/model, /clear …) gets a new conversation id: keep the name.
