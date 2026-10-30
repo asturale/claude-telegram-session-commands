@@ -4,6 +4,8 @@
                                  from the n-th on, plus "page-<n>" lines to page through
   claude-tg-resume <session-id>  replace the Telegram session with a fork of it
   claude-tg-resume use-<pid>     switch to an open relay session
+  claude-tg-resume name <id>     a short name for an open session, or nothing
+                                 while its topic is unclear (claude-tg-autoname)
 
 With the relay, the other open sessions come first (● label). Then the
 conversations from the project of CLAUDE_TG_CWD (default: your home directory)
@@ -34,6 +36,7 @@ SIDE_TASK = ("Side task (/btw)", "The user asks via Telegram (/remember)")
 # Automatic prompts from claude-tg-session: the first real request comes later.
 STARTUP = ("Started via /clear from Telegram. Send",
            "Extra session opened via /new in Telegram, next to the existing ones. Send",
+           "Extra session opened via /new in Telegram, next to the existing ones. The relay",
            "Model switched to ", "Permission mode switched to ", "Effort switched to ",
            "Session reloaded via /reload", "This earlier conversation was resumed via /resume")
 
@@ -129,13 +132,14 @@ def excerpt(path, limit=4000):
     return text
 
 
-def summarize(path):
+def summarize(path, ask=None, limit=LABEL_MAX):
     """One line about the topic, from a headless call without plugins, hooks,
     MCP servers, tools or a saved transcript."""
+    ask = ask or (f"Give its topic in one short line of at most {LABEL_MAX - 12} characters, in the "
+                  "language of the conversation, without quotes, full stop or introduction. "
+                  "Only that line.")
     prompt = ("Below is a Claude Code conversation (the user's requests, Claude's replies). "
-              f"Give its topic in one short line of at most {LABEL_MAX - 12} characters, in the "
-              "language of the conversation, without quotes, full stop or introduction. "
-              "Only that line.\n\n" + excerpt(path))
+              + ask + "\n\n" + excerpt(path))
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("CLAUDE_CODE_", "TELEGRAM_")) and k not in ("CLAUDECODE", "CLAUDE_PID")}
     env.update(env_file())  # the long-lived token, like the background sessions
@@ -152,7 +156,7 @@ def summarize(path):
     t = (r.stdout or "").strip().splitlines()
     if r.returncode or not t:
         return None
-    return t[0].strip(" .\"'*")[:LABEL_MAX]
+    return t[0].strip(" .\"'*")[:limit]
 
 
 def titles_for(paths):
@@ -209,10 +213,37 @@ if sys.argv[1].startswith("use-"):
         subprocess.run(["tg-send", "That session isn't open any more."])
     sys.exit(0 if ok else 1)
 
+TITLE_MODEL = setting("CLAUDE_TG_TITLE_MODEL", "haiku")
+
+if sys.argv[1] == "name":
+    # claude-tg-autoname: a short name for an open session, nothing while its topic is unclear.
+    f = next((HOME / ".claude/projects").glob(f"*/{sys.argv[2] if len(sys.argv) > 2 else '-'}.jsonl"), None)
+    if not f or not TITLE_MODEL:
+        sys.exit(0)
+    EXTRA_STARTUP = prefixes("CLAUDE_TG_RESUME_SKIP")
+    asked = False
+    with open(f, "rb") as fh:
+        for line in fh:
+            try:
+                c = user_text(json.loads(line))
+            except ValueError:
+                continue
+            if c is not None and not c.startswith(STARTUP + EXTRA_STARTUP + SIDE_TASK):
+                asked = True
+                break
+    if asked:
+        n = summarize(f, "Name this session after its topic or goal: one or two words, at most 16 "
+                         "characters, lowercase, in the language of the conversation, without quotes "
+                         "or punctuation. If the topic isn't clear yet, answer only -. Only the name.",
+                      limit=16)
+        subprocess.run(["rm", "-rf", str(project_dir(TITLES.parent / "titles"))])
+        if n and n.strip("-"):
+            print(n)
+    sys.exit(0)
+
 if sys.argv[1] != "list":
     os.execvp("claude-tg-session", ["claude-tg-session", "resume", sys.argv[1]])
 
-TITLE_MODEL = setting("CLAUDE_TG_TITLE_MODEL", "haiku")
 EXTRA_STARTUP = prefixes("CLAUDE_TG_RESUME_SKIP")
 EXTRA_SIDE_TASK = prefixes("CLAUDE_TG_RESUME_HIDE")
 project = project_dir(setting("CLAUDE_TG_CWD", str(HOME)))
