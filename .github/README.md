@@ -70,10 +70,10 @@ The prompt shows the rule before you tap. Rules are derived fail-closed:
 
 | Tool | Rule |
 |------|------|
-| `Bash` | a prefix (`Bash(git push:*)`, `Bash(ls:*)`) only for a short list of read-only or repository-local commands (`SAFE_PREFIXES` in `server.ts`); otherwise the exact command. No button for compound commands, variables, substitutions, redirects or glob characters. |
+| `Bash` | a prefix (`Bash(ls:*)`, `Bash(git status:*)`) only for a short list of read-only commands without exec- or write-capable flags (`SAFE_PREFIXES` in `server.ts`); otherwise the exact command. No button for compound commands, variables, substitutions, redirects or glob characters. |
 | MCP tools | the tool name |
 | `WebFetch` | `WebFetch(domain:<host>)` |
-| `Edit`/`Write`/`NotebookEdit`, `Read` | `Edit(//<dir>/**)` for a subdirectory of the project, otherwise the exact file. No button for paths with `..`, `.claude` or `.git`, or glob characters. |
+| `Edit`/`Write`/`NotebookEdit`, `Read` | the exact file (`Edit(//<path>)`); a directory glob would also cover nested `.git`/`.claude`. No button for paths with `..`, `.claude` or `.git`, or glob characters. |
 | `WebSearch`, `Glob`, `Grep`, `Agent`, … | the tool name |
 
 No button for other tools, or when the input preview was shortened. `TELEGRAM_PERMISSION_ALWAYS=0`
