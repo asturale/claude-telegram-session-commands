@@ -801,6 +801,14 @@ await mcp.connect(new StdioServerTransport())
 // When Claude Code closes the MCP connection, stdin gets EOF. Without this
 // the bot keeps polling forever as a zombie, holding the token and blocking
 // the next session with 409 Conflict.
+//
+// stdout and stderr are pipes to Claude Code too, so they close along with
+// stdin. Under Bun, writing to a closed pipe without an 'error' listener spins
+// the event loop at full CPU: shutdown()'s own "shutting down" line was enough,
+// the exit timer below never fired and SIGTERM was ignored. Drop those errors;
+// there is no one left to read the output anyway.
+process.stdout.on('error', () => {})
+process.stderr.on('error', () => {})
 let shuttingDown = false
 function shutdown(): void {
   if (shuttingDown) return
