@@ -436,17 +436,16 @@ const PROJECT_DIR = process.env.CLAUDE_PROJECT_DIR
 // Fail closed: a Bash prefix rule (`Bash(git status:*)`) only for these
 // commands; everything else gets an exact rule for the command as typed.
 // Value: subcommands that may become a prefix, or [] for "the command with any
-// arguments". Kept to commands that read or that only act on the repository
-// they run in; anything that can run arbitrary code (interpreters, sudo,
-// docker run, npm run, git config, …) stays exact.
+// arguments". Only commands with no flag that runs another program or writes
+// files: no git diff/log/show (external diff/textconv), no rg (--pre), no tree
+// (-o), no build or test runners (they run project code), no interpreters.
 const SAFE_PREFIXES: Record<string, string[]> = {
-  git: ['status', 'diff', 'log', 'show', 'fetch', 'pull', 'push', 'add', 'commit', 'branch', 'switch', 'checkout', 'restore', 'stash', 'tag', 'remote', 'rev-parse', 'blame', 'grep'],
-  ls: [], cat: [], head: [], tail: [], wc: [], grep: [], rg: [], pwd: [], which: [],
-  df: [], du: [], ps: [], stat: [], file: [], tree: [], uptime: [], free: [],
+  git: ['status'],
+  ls: [], cat: [], head: [], tail: [], wc: [], grep: [], pwd: [], which: [],
+  df: [], du: [], ps: [], stat: [], uptime: [], free: [],
   docker: ['ps', 'logs', 'images', 'inspect', 'stats'],
   systemctl: ['status', 'list-units', 'list-timers', 'is-active'],
   journalctl: [],
-  npm: ['test', 'ls', 'outdated'], bun: ['test'], cargo: ['build', 'check', 'test'], go: ['build', 'test', 'vet'],
 }
 // Built-in tools whose input has no rule syntax and whose blanket allow grants
 // nothing beyond what other rules already gate.
@@ -510,11 +509,8 @@ function permissionRule(tool_name: string, input_preview: string): string | null
       // a rule there would let Claude widen its own permissions.
       if (parts.some(s => s === '..' || s === '.' || s === '.claude' || s === '.git')) return null
       const verb = tool_name === 'Read' ? 'Read' : 'Edit' // Edit covers all file-editing tools
-      // A whole directory only below the project directory (not the project
-      // root itself); anywhere else just this file. "//" = absolute path.
-      const dir = parts.slice(0, -1).join('/')
-      const project = PROJECT_DIR?.replace(/\/+$/, '')
-      if (project && dir.startsWith(project + '/')) return `${verb}(/${dir}/**)`
+      // Just this file: a directory glob would also cover nested .git/.claude
+      // directories. "//" = absolute path.
       return `${verb}(/${p})`
     }
     default:
