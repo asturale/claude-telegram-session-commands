@@ -66,17 +66,17 @@ Permission prompts also get a **♾ Always allow** button. The channel protocol
 only carries "allow once" and "deny", so the plugin saves the rule itself: it
 adds it to `permissions.allow` in `$CLAUDE_PROJECT_DIR/.claude/settings.local.json`
 (the file the terminal's "don't ask again" writes to), then allows the request.
-"See more" shows the rule before you tap. The rule is derived from the request:
+The prompt shows the rule before you tap. Rules are derived fail-closed:
 
 | Tool | Rule |
 |------|------|
-| `Bash` | `Bash(git push:*)` for a command with a subcommand; the exact command when the second word is a flag or path, or for commands that run arbitrary code (`sudo`, `bash`, `python3`, `rm`, …). No button for compound commands (`&&`, `\|`, `;`, `$(…)`, redirects). |
+| `Bash` | a prefix (`Bash(git push:*)`, `Bash(ls:*)`) only for a short list of read-only or repository-local commands (`SAFE_PREFIXES` in `server.ts`); otherwise the exact command. No button for compound commands, variables, substitutions, redirects or glob characters. |
 | MCP tools | the tool name |
 | `WebFetch` | `WebFetch(domain:<host>)` |
-| `Edit`/`Write`/`NotebookEdit`, `Read` | `Edit(//<dir>/**)`, `Read(//<dir>/**)` |
-| other built-in tools | the tool name |
+| `Edit`/`Write`/`NotebookEdit`, `Read` | `Edit(//<dir>/**)` for a subdirectory of the project, otherwise the exact file. No button for paths with `..`, `.claude` or `.git`, or glob characters. |
+| `WebSearch`, `Glob`, `Grep`, `Agent`, … | the tool name |
 
-No button when the input preview was shortened. `TELEGRAM_PERMISSION_ALWAYS=0`
+No button for other tools, or when the input preview was shortened. `TELEGRAM_PERMISSION_ALWAYS=0`
 turns the button off.
 
 ## How it works

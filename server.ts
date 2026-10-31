@@ -433,12 +433,26 @@ const pendingPermissions = new Map<string, { tool_name: string; description: str
 const ALWAYS_ENABLED = process.env.TELEGRAM_PERMISSION_ALWAYS !== '0'
 const PROJECT_DIR = process.env.CLAUDE_PROJECT_DIR
 
-// Commands whose prefix would allow arbitrary code: only exact rules.
-const EXACT_ONLY_COMMANDS = new Set([
-  'sudo', 'su', 'doas', 'bash', 'sh', 'zsh', 'fish', 'dash', 'eval', 'exec',
-  'env', 'xargs', 'nohup', 'timeout', 'nice', 'ssh', 'python', 'python3',
-  'node', 'bun', 'deno', 'perl', 'ruby', 'php', 'rm', 'dd', 'chmod', 'chown',
-])
+// Fail closed: a Bash prefix rule (`Bash(git status:*)`) only for these
+// commands; everything else gets an exact rule for the command as typed.
+// Value: subcommands that may become a prefix, or [] for "the command with any
+// arguments". Kept to commands that read or that only act on the repository
+// they run in; anything that can run arbitrary code (interpreters, sudo,
+// docker run, npm run, git config, …) stays exact.
+const SAFE_PREFIXES: Record<string, string[]> = {
+  git: ['status', 'diff', 'log', 'show', 'fetch', 'pull', 'push', 'add', 'commit', 'branch', 'switch', 'checkout', 'restore', 'stash', 'tag', 'remote', 'rev-parse', 'blame', 'grep'],
+  ls: [], cat: [], head: [], tail: [], wc: [], grep: [], rg: [], pwd: [], which: [],
+  df: [], du: [], ps: [], stat: [], file: [], tree: [], uptime: [], free: [],
+  docker: ['ps', 'logs', 'images', 'inspect', 'stats'],
+  systemctl: ['status', 'list-units', 'list-timers', 'is-active'],
+  journalctl: [],
+  npm: ['test', 'ls', 'outdated'], bun: ['test'], cargo: ['build', 'check', 'test'], go: ['build', 'test', 'vet'],
+}
+// Built-in tools whose input has no rule syntax and whose blanket allow grants
+// nothing beyond what other rules already gate.
+const WHOLE_TOOLS = new Set(['WebSearch', 'Glob', 'Grep', 'LS', 'TodoWrite', 'Agent', 'Task', 'NotebookRead'])
+// Rule syntax characters: parentheses end the rule, * ? [ ] { } are globs.
+const RULE_SPECIAL = /[()*?[\]{}\\'"]/
 
 // Derive the permission rule an "Always" tap adds, from the tool name and
 // Claude Code's input preview (JSON-like, `{ "key": value, … }`, possibly
@@ -459,24 +473,19 @@ function permissionRule(tool_name: string, input_preview: string): string | null
     }
   }
   const str = (k: string) => (typeof input[k] === 'string' ? (input[k] as string) : undefined)
-  // Rule content can't contain parentheses in Claude Code's rule syntax.
-  const safe = (s: string) => !/[()]/.test(s)
 
   switch (tool_name) {
     case 'Bash': {
       const command = str('command')?.trim()
-      if (!command || !safe(command)) return null
-      // Compound commands, substitutions and redirects: no rule. A prefix
-      // would cover more than it looks like, and Claude Code checks each part.
-      if (/[;&|`<>\n\r]|\$\(/.test(command)) return null
+      if (!command || RULE_SPECIAL.test(command)) return null
+      // Compound commands, substitutions, variables and redirects: no rule.
+      if (/[;&|`<>$\n\r]/.test(command)) return null
+      if (command.endsWith(':*')) return null
       const tokens = command.split(/\s+/)
       const first = tokens[0]!
-      if (first.includes('=')) return null
-      const base = first.split('/').pop()!
-      if (EXACT_ONLY_COMMANDS.has(base)) return `Bash(${command})`
-      // "git push …" → Bash(git push:*); a flag or path as second word → exact.
-      if (tokens.length === 1) return `Bash(${first}:*)`
-      if (/^[a-z][a-z0-9._-]*$/i.test(tokens[1]!)) return `Bash(${first} ${tokens[1]}:*)`
+      const subs = Object.hasOwn(SAFE_PREFIXES, first) ? SAFE_PREFIXES[first]! : null
+      if (subs && subs.length === 0) return `Bash(${first}:*)`
+      if (subs && tokens[1] && subs.includes(tokens[1])) return `Bash(${first} ${tokens[1]}:*)`
       return `Bash(${command})`
     }
     case 'WebFetch': {
@@ -495,16 +504,21 @@ function permissionRule(tool_name: string, input_preview: string): string | null
     case 'NotebookEdit':
     case 'Read': {
       const p = str('file_path') ?? str('notebook_path')
-      if (!p || !p.startsWith('/') || !safe(p)) return null
-      const dir = p.slice(0, p.lastIndexOf('/'))
-      if (!dir) return null // never all of /
-      // "//" marks an absolute path in permission rules; Edit covers all
-      // file-editing tools.
-      return `${tool_name === 'Read' ? 'Read' : 'Edit'}(/${dir}/**)`
+      if (!p || !p.startsWith('/') || RULE_SPECIAL.test(p) || /[\s\n\r]/.test(p)) return null
+      const parts = p.split('/')
+      // No relative segments, and never Claude's own settings or git internals:
+      // a rule there would let Claude widen its own permissions.
+      if (parts.some(s => s === '..' || s === '.' || s === '.claude' || s === '.git')) return null
+      const verb = tool_name === 'Read' ? 'Read' : 'Edit' // Edit covers all file-editing tools
+      // A whole directory only below the project directory (not the project
+      // root itself); anywhere else just this file. "//" = absolute path.
+      const dir = parts.slice(0, -1).join('/')
+      const project = PROJECT_DIR?.replace(/\/+$/, '')
+      if (project && dir.startsWith(project + '/')) return `${verb}(/${dir}/**)`
+      return `${verb}(/${p})`
     }
     default:
-      // Other built-in tools without a rule syntax for their input.
-      return /^[A-Za-z]+$/.test(tool_name) ? tool_name : null
+      return WHOLE_TOOLS.has(tool_name) ? tool_name : null
   }
 }
 
@@ -566,7 +580,7 @@ mcp.setNotificationHandler(
     const rule = ALWAYS_ENABLED && PROJECT_DIR ? permissionRule(tool_name, input_preview) : null
     pendingPermissions.set(request_id, { tool_name, description, input_preview, rule })
     const access = loadAccess()
-    const text = `🔐 Permission: ${tool_name}`
+    const text = `🔐 Permission: ${tool_name}` + (rule ? `\n♾ Always allow adds: ${rule}` : '')
     const keyboard = permissionKeyboard(request_id, rule, true)
     for (const chat_id of access.allowFrom) {
       void bot.api.sendMessage(chat_id, text, { reply_markup: keyboard }).catch(e => {
@@ -1422,7 +1436,8 @@ bot.on('callback_query:data', async ctx => {
   // twice and the chat history shows what was chosen.
   const msg = ctx.callbackQuery.message
   if (msg && 'text' in msg && msg.text) {
-    await ctx.editMessageText(`${msg.text}\n\n${label}`).catch(() => {})
+    const shown = msg.text.replace(/\n+♾ Always allow adds: .*$/m, '')
+    await ctx.editMessageText(`${shown}\n\n${label}`).catch(() => {})
   }
 })
 
