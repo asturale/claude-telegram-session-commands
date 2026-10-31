@@ -421,7 +421,131 @@ const mcp = new Server(
 )
 
 // Stores full permission details for "See more" expansion keyed by request_id.
-const pendingPermissions = new Map<string, { tool_name: string; description: string; input_preview: string }>()
+// `rule` is the permission rule an "Always" tap would add (null: no such button).
+const pendingPermissions = new Map<string, { tool_name: string; description: string; input_preview: string; rule: string | null }>()
+
+// "Always allow". The channel protocol only carries allow (this once) and
+// deny, so the plugin persists the rule itself: it adds it to the allow list in
+// <project>/.claude/settings.local.json, the file the terminal's "don't ask
+// again" writes to, and then allows this request. Claude Code picks up the
+// changed settings file for later calls. TELEGRAM_PERMISSION_ALWAYS=0 turns
+// the button off.
+const ALWAYS_ENABLED = process.env.TELEGRAM_PERMISSION_ALWAYS !== '0'
+const PROJECT_DIR = process.env.CLAUDE_PROJECT_DIR
+
+// Commands whose prefix would allow arbitrary code: only exact rules.
+const EXACT_ONLY_COMMANDS = new Set([
+  'sudo', 'su', 'doas', 'bash', 'sh', 'zsh', 'fish', 'dash', 'eval', 'exec',
+  'env', 'xargs', 'nohup', 'timeout', 'nice', 'ssh', 'python', 'python3',
+  'node', 'bun', 'deno', 'perl', 'ruby', 'php', 'rm', 'dd', 'chmod', 'chown',
+])
+
+// Derive the permission rule an "Always" tap adds, from the tool name and
+// Claude Code's input preview (JSON-like, `{ "key": value, … }`, possibly
+// shortened). Returns null when no safe rule can be derived; then the request
+// only gets Allow/Deny.
+function permissionRule(tool_name: string, input_preview: string): string | null {
+  if (tool_name.startsWith('mcp__')) return tool_name
+  if (input_preview.includes('⋯') || input_preview.includes('…')) return null
+  let input: Record<string, unknown> = {}
+  const trimmed = input_preview.trim()
+  if (trimmed && trimmed !== '{}' && trimmed !== '{ }') {
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+      input = parsed as Record<string, unknown>
+    } catch {
+      return null
+    }
+  }
+  const str = (k: string) => (typeof input[k] === 'string' ? (input[k] as string) : undefined)
+  // Rule content can't contain parentheses in Claude Code's rule syntax.
+  const safe = (s: string) => !/[()]/.test(s)
+
+  switch (tool_name) {
+    case 'Bash': {
+      const command = str('command')?.trim()
+      if (!command || !safe(command)) return null
+      // Compound commands, substitutions and redirects: no rule. A prefix
+      // would cover more than it looks like, and Claude Code checks each part.
+      if (/[;&|`<>\n\r]|\$\(/.test(command)) return null
+      const tokens = command.split(/\s+/)
+      const first = tokens[0]!
+      if (first.includes('=')) return null
+      const base = first.split('/').pop()!
+      if (EXACT_ONLY_COMMANDS.has(base)) return `Bash(${command})`
+      // "git push …" → Bash(git push:*); a flag or path as second word → exact.
+      if (tokens.length === 1) return `Bash(${first}:*)`
+      if (/^[a-z][a-z0-9._-]*$/i.test(tokens[1]!)) return `Bash(${first} ${tokens[1]}:*)`
+      return `Bash(${command})`
+    }
+    case 'WebFetch': {
+      const url = str('url')
+      if (!url) return null
+      try {
+        const host = new URL(url).hostname
+        return host ? `WebFetch(domain:${host})` : null
+      } catch {
+        return null
+      }
+    }
+    case 'Edit':
+    case 'Write':
+    case 'MultiEdit':
+    case 'NotebookEdit':
+    case 'Read': {
+      const p = str('file_path') ?? str('notebook_path')
+      if (!p || !p.startsWith('/') || !safe(p)) return null
+      const dir = p.slice(0, p.lastIndexOf('/'))
+      if (!dir) return null // never all of /
+      // "//" marks an absolute path in permission rules; Edit covers all
+      // file-editing tools.
+      return `${tool_name === 'Read' ? 'Read' : 'Edit'}(/${dir}/**)`
+    }
+    default:
+      // Other built-in tools without a rule syntax for their input.
+      return /^[A-Za-z]+$/.test(tool_name) ? tool_name : null
+  }
+}
+
+// Add `rule` to permissions.allow in the project's settings.local.json.
+// Refuses (throws) rather than overwrite a file it can't parse.
+function addAllowRule(rule: string): string {
+  if (!PROJECT_DIR) throw new Error('CLAUDE_PROJECT_DIR is not set')
+  const dir = join(PROJECT_DIR, '.claude')
+  const file = join(dir, 'settings.local.json')
+  let settings: Record<string, unknown> = {}
+  let raw: string | null = null
+  try {
+    raw = readFileSync(file, 'utf8')
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
+  }
+  if (raw !== null && raw.trim()) {
+    const parsed = JSON.parse(raw)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(`${file} is not a JSON object`)
+    settings = parsed
+  }
+  const perms = (settings.permissions ?? {}) as Record<string, unknown>
+  if (typeof perms !== 'object' || Array.isArray(perms)) throw new Error(`permissions in ${file} is not an object`)
+  const allow = Array.isArray(perms.allow) ? (perms.allow as unknown[]) : []
+  if (!allow.includes(rule)) allow.push(rule)
+  perms.allow = allow
+  settings.permissions = perms
+  mkdirSync(dir, { recursive: true })
+  const tmp = `${file}.tmp-${process.pid}`
+  writeFileSync(tmp, JSON.stringify(settings, null, 2) + '\n')
+  renameSync(tmp, file)
+  return file
+}
+
+function permissionKeyboard(request_id: string, rule: string | null, withMore: boolean): InlineKeyboard {
+  const keyboard = new InlineKeyboard()
+  if (withMore) keyboard.text('See more', `perm:more:${request_id}`)
+  keyboard.text('✅ Allow', `perm:allow:${request_id}`).text('❌ Deny', `perm:deny:${request_id}`)
+  if (rule) keyboard.row().text('♾ Always allow', `perm:always:${request_id}`)
+  return keyboard
+}
 
 // Receive permission_request from CC → format → send to all allowlisted DMs.
 // Groups are intentionally excluded — the security thread resolution was
@@ -439,13 +563,11 @@ mcp.setNotificationHandler(
   }),
   async ({ params }) => {
     const { request_id, tool_name, description, input_preview } = params
-    pendingPermissions.set(request_id, { tool_name, description, input_preview })
+    const rule = ALWAYS_ENABLED && PROJECT_DIR ? permissionRule(tool_name, input_preview) : null
+    pendingPermissions.set(request_id, { tool_name, description, input_preview, rule })
     const access = loadAccess()
     const text = `🔐 Permission: ${tool_name}`
-    const keyboard = new InlineKeyboard()
-      .text('See more', `perm:more:${request_id}`)
-      .text('✅ Allow', `perm:allow:${request_id}`)
-      .text('❌ Deny', `perm:deny:${request_id}`)
+    const keyboard = permissionKeyboard(request_id, rule, true)
     for (const chat_id of access.allowFrom) {
       void bot.api.sendMessage(chat_id, text, { reply_markup: keyboard }).catch(e => {
         process.stderr.write(`permission_request send to ${chat_id} failed: ${e}\n`)
@@ -1230,11 +1352,11 @@ bot.callbackQuery(/^(answer:(\d)|voice:(yes|no))$/, async ctx => {
 })
 
 // Inline-button handler for permission requests. Callback data is
-// `perm:allow:<id>`, `perm:deny:<id>`, or `perm:more:<id>`.
+// `perm:allow:<id>`, `perm:deny:<id>`, `perm:always:<id>` or `perm:more:<id>`.
 // Security mirrors the text-reply path: allowFrom must contain the sender.
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
-  const m = /^perm:(allow|deny|more):([a-km-z]{5})$/.exec(data)
+  const m = /^perm:(allow|deny|always|more):([a-km-z]{5})$/.exec(data)
   if (!m) {
     await ctx.answerCallbackQuery().catch(() => {})
     return
@@ -1253,7 +1375,7 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Details no longer available.' }).catch(() => {})
       return
     }
-    const { tool_name, description, input_preview } = details
+    const { tool_name, description, input_preview, rule } = details
     let prettyInput: string
     try {
       prettyInput = JSON.stringify(JSON.parse(input_preview), null, 2)
@@ -1264,22 +1386,38 @@ bot.on('callback_query:data', async ctx => {
       `🔐 Permission: ${tool_name}\n\n` +
       `tool_name: ${tool_name}\n` +
       `description: ${description}\n` +
-      `input_preview:\n${prettyInput}`
-    const keyboard = new InlineKeyboard()
-      .text('✅ Allow', `perm:allow:${request_id}`)
-      .text('❌ Deny', `perm:deny:${request_id}`)
+      `input_preview:\n${prettyInput}` +
+      (rule ? `\n\n♾ Always allow adds: ${rule}` : '')
+    const keyboard = permissionKeyboard(request_id, rule, false)
     await ctx.editMessageText(expanded, { reply_markup: keyboard }).catch(() => {})
     await ctx.answerCallbackQuery().catch(() => {})
     return
   }
 
+  let label = behavior === 'deny' ? '❌ Denied' : '✅ Allowed'
+  if (behavior === 'always') {
+    const rule = pendingPermissions.get(request_id)?.rule
+    if (!rule) {
+      await ctx.answerCallbackQuery({ text: 'Request no longer pending.' }).catch(() => {})
+      return
+    }
+    // Persist first: if that fails, leave the request open for Allow/Deny.
+    try {
+      addAllowRule(rule)
+    } catch (e) {
+      process.stderr.write(`telegram channel: adding allow rule failed: ${e}\n`)
+      await ctx.answerCallbackQuery({ text: `Could not save the rule: ${e instanceof Error ? e.message : e}`.slice(0, 190), show_alert: true }).catch(() => {})
+      return
+    }
+    label = `♾ Always allowed: ${rule}`
+  }
+
   void mcp.notification({
     method: 'notifications/claude/channel/permission',
-    params: { request_id, behavior },
+    params: { request_id, behavior: behavior === 'deny' ? 'deny' : 'allow' },
   })
   pendingPermissions.delete(request_id)
-  const label = behavior === 'allow' ? '✅ Allowed' : '❌ Denied'
-  await ctx.answerCallbackQuery({ text: label }).catch(() => {})
+  await ctx.answerCallbackQuery({ text: label.slice(0, 190) }).catch(() => {})
   // Replace buttons with the outcome so the same request can't be answered
   // twice and the chat history shows what was chosen.
   const msg = ctx.callbackQuery.message
