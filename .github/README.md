@@ -29,6 +29,7 @@ The upstream documentation is in [README.md](../README.md) and [ACCESS.md](../AC
 | `TELEGRAM_SKILL_CMD` | `<cmd> list` as above; `<cmd> <name>` on tap, `/skill <name> [text]` runs `<cmd> <name> [text]` |
 | `/remember <text>` | Save a note to Claude's memory | `TELEGRAM_REMEMBER_CMD` |
 | `/usage` | Plan limits and token usage | `TELEGRAM_USAGE_CMD` |
+| `/force [text]` | Let the session go past the usage guard; resumes it if it was paused (see [`scripts/`](../scripts/README.md#usage-guard)) | `TELEGRAM_FORCE_CMD` |
 | `/status` | Pairing status, plus the output of your status script | `TELEGRAM_STATUS_CMD` |
 | `/progress` | One message that updates live while the session works, with a stop button | `TELEGRAM_PROGRESS_CMD` |
 
@@ -92,6 +93,7 @@ TELEGRAM_RELOAD_CMD=/path/to/reload-script
 TELEGRAM_COMPACT_CMD=/path/to/compact-script
 TELEGRAM_BTW_CMD=/path/to/btw-script
 TELEGRAM_REMEMBER_CMD=/path/to/remember-script
+TELEGRAM_FORCE_CMD=/path/to/force-script
 # Reports (stdout is the reply)
 TELEGRAM_USAGE_CMD=/path/to/usage-script
 TELEGRAM_STATUS_CMD=/path/to/status-script

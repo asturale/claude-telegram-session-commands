@@ -91,11 +91,50 @@ For a machine nobody logs in to, use a long-lived token: run
 | `claude-tg-autoname` | relay | A one- or two-word name for a session once its topic is clear (`claude-tg-resume name`, same model as the summaries) |
 | `claude-tg-transcribe` | voice messages | Transcript through whisper.cpp, retried in your language if whisper guessed another, then cleaned up by a small model |
 | `claude-tg-patch-plugin` | every start | Applies `server.ts` and `relay.ts` from this repository to the installed plugin |
+| `claude-tg-usage-guard` | `PreToolUse` hook, timer | Pauses sessions near your plan limits and resumes them after the reset (see below) |
+| `claude-tg-force` | `/force` | Takes the session out of the usage guard and resumes it if it was paused |
 | `tg-send` | side sessions, errors | Sends a message to you through the Bot API |
 | `claude-tg-common.sh` | the bash scripts | Settings, `PATH` and the token |
 
 State and logs are in `~/.local/state/claude-tg/`: `session.log` for session
 changes, `btw.log` for side tasks.
+
+## Usage guard
+
+Optional. Sessions that run on their own can use up your whole 5-hour window
+or week, and then you have nothing left when you need Claude for something
+urgent. `claude-tg-usage-guard` keeps the end free:
+
+- At 80% of the 5-hour window or 90% of the week (`CLAUDE_TG_GUARD_SESSION`,
+  `CLAUDE_TG_GUARD_WEEK` in `~/.config/claude-tg.env`), every tool call is
+  denied except Telegram replies, `ToolSearch` and the task tools. The session
+  tells you where it stands and stops.
+- You get a message, and a one-shot user timer (`systemd-run --user`, else a
+  detached `sleep`) types a "continue" message into the session two minutes
+  after the reset. If it is still over a cap then (the week), it waits for the
+  next reset.
+- `/force [text]` takes the session out of the guard for the rest of its life
+  and, if it was paused, resumes it right away. Use it for the session you
+  need now.
+
+The limits come from the same endpoint as `/usage` (cached for 3 minutes in
+the same file). If they can't be read, nothing is blocked. To turn it on, add
+the hook to `~/.claude/settings.json`:
+
+```json
+"hooks": {
+  "PreToolUse": [
+    { "hooks": [{ "type": "command", "command": "/home/you/.local/bin/claude-tg-usage-guard", "timeout": 15 }] }
+  ]
+}
+```
+
+and `TELEGRAM_FORCE_CMD` to the plugin's `.env`. It applies to every Claude
+Code session on the machine, also ones not started from Telegram. To turn it
+off for a while: `touch ~/.local/state/claude-tg/usage-guard/off`.
+
+The guard checks between tool calls, so a long turn can still go a few percent
+past the cap. That's why the default is 80% and not 95%.
 
 ## Stopping
 

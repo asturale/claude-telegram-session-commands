@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# /force [text] (TELEGRAM_FORCE_CMD): the usage guard no longer applies to the
+# session; if it was paused, it continues now (with the text, if given).
+. "$(dirname "$(readlink -f "$0")")/claude-tg-common.sh"
+exec 2>>"$CLAUDE_TG_STATE/session.log"
+echo "=== $(date -Is) force" >&2
+
+sid=$(claude-tg-current | python3 -c "import json,sys; print(json.load(sys.stdin)['sessionId'])")
+if [ -z "$sid" ]; then
+  tg-send "/force failed: no Telegram background session found."
+  exit 1
+fi
+tg-send "$(claude-tg-usage-guard force "$sid" "$*")"
