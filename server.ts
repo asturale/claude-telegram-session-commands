@@ -995,6 +995,8 @@ const actions = [
     description: 'Restart the session, same conversation', help: '/reload — restart the session, same conversation' },
   { name: 'remember', env: 'TELEGRAM_REMEMBER_CMD', arg: 'required', ack: 'Saving to memory…',
     description: 'Save a note to memory', help: '/remember <text> — save a note to memory' },
+  { name: 'force', env: 'TELEGRAM_FORCE_CMD', arg: 'optional', ack: '',
+    description: 'Let the session go past the usage guard', help: '/force [text] — let the session go past the usage guard (resumes it if paused)' },
 ]
 
 for (const a of actions) {
