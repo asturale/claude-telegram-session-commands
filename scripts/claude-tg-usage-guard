@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""Usage guard: keep the end of your plan limits free, pause and resume sessions.
+
+  claude-tg-usage-guard              PreToolUse hook (reads the hook JSON on stdin)
+  claude-tg-usage-guard resume <id>  run by the timer at the reset: resume a paused session
+  claude-tg-usage-guard force <id>   exempt a session and resume it now (/force)
+
+Once the 5-hour window is at CLAUDE_TG_GUARD_SESSION % or more (default 80), or
+the week at CLAUDE_TG_GUARD_WEEK % (default 90), every tool call is denied
+except Telegram replies, ToolSearch and the task tools. The session tells you
+where it stands and stops, so the rest stays free for whatever you need it for.
+
+The first time a session is stopped it is recorded, you get a Telegram message,
+and a one-shot user timer (systemd-run, else a detached sleep) runs
+`claude-tg-usage-guard resume <session id>` two minutes after the reset. That
+types a "continue" message into the session with claude-tg-type. A session you
+`/force` is exempt for the rest of its life.
+
+Limits come from api.anthropic.com/api/oauth/usage, cached for 3 minutes in the
+same file /usage uses. If they can't be read, nothing is blocked.
+Turn the guard off: `touch ~/.local/state/claude-tg/usage-guard/off`.
+"""
+import json, os, re, shutil, subprocess, sys, time, urllib.error, urllib.request
+from datetime import datetime
+from pathlib import Path
+
+HOME = Path.home()
+BIN = Path(os.path.realpath(__file__)).parent
+ENV_FILE = HOME / ".config/claude-tg.env"
+TG_DIR = Path(os.environ.get("TELEGRAM_STATE_DIR") or HOME / ".claude/channels/telegram")
+USAGE_CACHE = HOME / ".local/state/claude-tg/usage.json"  # shared with claude-tg-usage
+STATE = HOME / ".local/state/claude-tg/usage-guard"
+PAUSED, FORCED = STATE / "paused", STATE / "force"
+CACHE_S = 180  # the endpoint rate-limits hard
+RESUME_DELAY = 120  # seconds after the reset
+ALLOWED = re.compile(r"^(mcp__plugin_telegram_telegram__.*|ToolSearch|Task(Create|Update|List|Get))$")
+
+
+def setting(key, default):
+    """From the environment, else from ~/.config/claude-tg.env."""
+    if os.environ.get(key):
+        return os.environ[key]
+    try:
+        for line in ENV_FILE.read_text().splitlines():
+            if line.startswith(key + "="):
+                return line.split("=", 1)[1].strip().strip('"') or default
+    except OSError:
+        pass
+    return default
+
+
+SESSION_MAX = float(setting("CLAUDE_TG_GUARD_SESSION", "80"))
+WEEK_MAX = float(setting("CLAUDE_TG_GUARD_WEEK", "90"))
+
+
+def token():
+    tok = setting("CLAUDE_CODE_OAUTH_TOKEN", "")
+    if tok:
+        return tok
+    try:
+        return json.loads((HOME / ".claude/.credentials.json").read_text())["claudeAiOauth"]["accessToken"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def usage(fresh=False):
+    try:
+        st = json.loads(USAGE_CACHE.read_text())
+    except (OSError, ValueError):
+        st = {}
+    now = time.time()
+    if not fresh and st.get("data") and now - st.get("fetched", 0) < CACHE_S:
+        return st["data"]
+    if now < st.get("retry_at", 0) or not token():
+        return st.get("data")
+    req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage", headers={
+        "Authorization": f"Bearer {token()}", "anthropic-beta": "oauth-2025-04-20"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            st = {"data": json.loads(r.read()), "fetched": now}
+    except urllib.error.HTTPError as e:
+        if e.code != 429:
+            return st.get("data")
+        st["retry_at"] = now + int(e.headers.get("retry-after") or 600)
+    except Exception:
+        return st.get("data")
+    USAGE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = USAGE_CACHE.with_name(f".usage.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(st))
+    tmp.replace(USAGE_CACHE)
+    return st.get("data")
+
+
+def over_limit(data):
+    """(label, percent, reset datetime or None) of the cap that is hit, or None."""
+    for key, label, cap in (("five_hour", "5-hour window", SESSION_MAX), ("seven_day", "weekly limit", WEEK_MAX)):
+        v = (data or {}).get(key) or {}
+        if v.get("utilization") is not None and float(v["utilization"]) >= cap:
+            try:
+                reset = datetime.fromisoformat(v["resets_at"])
+            except (KeyError, TypeError, ValueError):
+                reset = None
+            return label, float(v["utilization"]), reset
+    return None
+
+
+def send(text):
+    subprocess.run([str(BIN / "tg-send"), text], capture_output=True, timeout=30)
+
+
+def name(sid):
+    try:
+        return json.loads((TG_DIR / "session-names.json").read_text()).get(sid) or sid[:8]
+    except (OSError, ValueError):
+        return sid[:8]
+
+
+def unit(sid):
+    return f"claude-tg-resume-{sid[:8]}"
+
+
+def schedule(sid, at):
+    delay = max(60, int(at - time.time()))
+    ok = shutil.which("systemd-run") and subprocess.run(
+        ["systemd-run", "--user", "--quiet", f"--unit={unit(sid)}", f"--on-active={delay}s",
+         "--timer-property=AccuracySec=30s", str(BIN / "claude-tg-usage-guard"), "resume", sid],
+        capture_output=True).returncode == 0
+    if not ok:
+        subprocess.Popen(["setsid", "sh", "-c", f'sleep {delay}; exec "$0" resume "$1"',
+                          str(BIN / "claude-tg-usage-guard"), sid],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def unschedule(sid):
+    if shutil.which("systemctl"):
+        subprocess.run(["systemctl", "--user", "stop", f"{unit(sid)}.timer"], capture_output=True)
+
+
+def pause(sid, label, pct, reset):
+    """Record the pause once per session, tell you, and schedule the resume."""
+    PAUSED.mkdir(parents=True, exist_ok=True)
+    rec = PAUSED / f"{sid}.json"
+    if rec.exists():
+        return
+    at = (reset.timestamp() if reset else time.time() + 5 * 3600) + RESUME_DELAY
+    if os.environ.get("CLAUDE_TG_GUARD_RESUME_IN"):  # testing
+        at = time.time() + float(os.environ["CLAUDE_TG_GUARD_RESUME_IN"])
+    rec.write_text(json.dumps({"session": sid, "limit": label, "percent": pct, "resume_at": at}))
+    schedule(sid, at)
+    fmt = "%a %H:%M" if at - time.time() > 20 * 3600 else "%H:%M"
+    send(f"⏸ Paused \"{name(sid)}\": {label} at {pct:.0f}%. "
+         f"It continues by itself at {datetime.fromtimestamp(at).strftime(fmt)}. "
+         f"/force in that session lets it go on now.")
+
+
+def agent(sid):
+    try:
+        out = subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True, timeout=60).stdout
+        return next((a for a in json.loads(out) if a.get("sessionId") == sid), None)
+    except Exception:
+        return None
+
+
+def type_into(a, text):
+    subprocess.run([str(BIN / "claude-tg-type"), a["id"], text], timeout=120)
+
+
+def hook():
+    try:
+        h = json.load(sys.stdin)
+    except ValueError:
+        return
+    sid = h.get("session_id", "")
+    if (STATE / "off").exists() or ALLOWED.match(h.get("tool_name", "")) or (FORCED / sid).exists():
+        return
+    hit = over_limit(usage())
+    if not hit:
+        return
+    label, pct, reset = hit
+    pause(sid, label, pct, reset)
+    when = reset.astimezone().strftime("%a %H:%M") if reset else "later"
+    reason = (f"USAGE GUARD: the {label} is at {pct:.0f}% (caps: {SESSION_MAX:.0f}% for 5 hours, "
+              f"{WEEK_MAX:.0f}% for the week); the rest is kept free. Tools are blocked in this session. "
+              f"Stop now: send the user one short Telegram reply with where you are and what is left, then end "
+              f"your turn. Don't retry other tools. The session gets a 'continue' message after the reset "
+              f"({when}); the user can send /force to let it go on now.")
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                             "permissionDecisionReason": reason}}))
+
+
+def resume(sid):
+    rec = PAUSED / f"{sid}.json"
+    if not rec.exists():
+        return  # resumed already, or forced
+    a = agent(sid)
+    rec.unlink()
+    if not a:
+        send(f"▶ The limit has reset, but \"{name(sid)}\" no longer runs; nothing resumed.")
+        return
+    hit = over_limit(usage(fresh=True))
+    if hit:
+        pause(sid, *hit)  # still over (the weekly cap, say): wait for the next reset
+        return
+    if a.get("state") != "working":  # unless you got it going already
+        type_into(a, "The usage limit has reset (usage guard). Carry on with your task where you left off.")
+    send(f"▶ Resumed \"{name(sid)}\".")
+
+
+def force(sid, text=""):
+    FORCED.mkdir(parents=True, exist_ok=True)
+    (FORCED / sid).touch()
+    rec = PAUSED / f"{sid}.json"
+    if rec.exists():
+        rec.unlink()
+        unschedule(sid)
+        a = agent(sid)
+        if a:
+            type_into(a, text or "The user sent /force: the usage guard no longer applies to this session. "
+                                 "Carry on with your task where you left off.")
+            print(f"Usage guard off for \"{name(sid)}\"; resumed.")
+            return
+    elif text:
+        a = agent(sid)
+        if a:
+            type_into(a, text)
+    print(f"Usage guard off for \"{name(sid)}\" for the rest of this session.")
+
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    if not args:
+        hook()
+    elif args[0] == "resume" and len(args) == 2:
+        resume(args[1])
+    elif args[0] == "force" and len(args) >= 2:
+        force(args[1], " ".join(args[2:]))
+    else:
+        sys.exit(__doc__)
