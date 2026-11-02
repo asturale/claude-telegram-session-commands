@@ -82,7 +82,16 @@ case "$mode" in
         prompt="$prompt You were working in the worktree $wt: enter it again first with EnterWorktree (path=\"$wt\")."
         [ "$rc" = 3 ] && tg-send "The session can't start in its worktree directly: the repo $prep isn't trusted yet (run claude there once and accept). It enters the worktree itself, which may wait for approval in the terminal."
       fi
+    elif [ -n "$wt" ] && [ "$wt" != "$start_dir" ] && [ -d "$wt" ]; then
+      # Any other directory the old session had cd'd into: the fork starts in
+      # CLAUDE_TG_CWD (it keeps that project's memory and settings), so tell it,
+      # or relative paths from before the switch silently stop resolving.
+      prompt="$prompt This session starts in $start_dir, but you were last working in $wt: cd back there (or use absolute paths) before running anything with a relative path."
     fi
+    # A background session gets a new job directory, so $CLAUDE_JOB_DIR changed.
+    old_job="$HOME/.claude/jobs/$old_id"
+    [ -n "$old_id" ] && [ -d "$old_job" ] \
+      && prompt="$prompt \$CLAUDE_JOB_DIR now points to this session's own job directory; files you made earlier in it are still in $old_job."
     ;;
   resume)
     [[ "$1" =~ ^[0-9a-f-]{36}$ ]] || { tg-send "Invalid session id."; exit 1; }
