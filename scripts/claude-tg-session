@@ -29,6 +29,7 @@ PIDFILE="$TG_DIR/bot.pid"
 HANDOVER="$TG_DIR/relay-handover"
 mode="$1"; shift || true
 adds=""  # set: a session next to the others, the current one stays
+start_dir="$CLAUDE_TG_CWD"  # where the new session starts
 
 # A plugin update overwrites the patched server.ts, so reapply it first.
 claude-tg-patch-plugin || echo "claude-tg-patch-plugin failed (continuing)"
@@ -42,6 +43,49 @@ echo "old: pid=$old_pid bg=$old_id session=$old_session model=$old_model perm=$o
 model="${old_model:-$CLAUDE_TG_MODEL}"
 perm="${old_perm:-$CLAUDE_TG_PERMISSION_MODE}"
 effort="$old_effort"
+# Prepare a worktree the old session was already in, so a background session
+# can start there without a prompt nobody sees (those only show in the
+# terminal). Prints the --settings JSON to start it with.
+# - trust (stored per worktree path): a git repo or worktree whose trust prompt
+#   was never accepted refuses a background start ("Workspace not trusted").
+# - MCP servers added with `claude mcp add` (local scope) are stored per
+#   project, which for a worktree is its main checkout: the ones of
+#   CLAUDE_TG_CWD are added there, or the session would lose them.
+# - a .mcp.json in the repo asks whether to use its servers: answered "no"
+#   through disabledMcpjsonServers in the returned settings.
+prepare_worktree() {
+  local main
+  main=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+  python3 - "$1" "${main%/.git}" "$CLAUDE_TG_CWD" <<'PY'
+import json, os, sys, tempfile
+wt, main, home_dir = sys.argv[1:4]
+cfg = os.path.expanduser("~/.claude.json")
+with open(cfg) as f:
+    d = json.load(f)
+projects = d.setdefault("projects", {})
+before = json.dumps(d, sort_keys=True)
+projects.setdefault(wt, {})["hasTrustDialogAccepted"] = True
+mine = projects.get(home_dir, {}).get("mcpServers", {})
+if main and main != home_dir and mine:
+    servers = projects.setdefault(main, {}).setdefault("mcpServers", {})
+    for name, conf in mine.items():
+        servers.setdefault(name, conf)
+if json.dumps(d, sort_keys=True) != before:
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(cfg), prefix=".claude.json.")
+    with os.fdopen(fd, "w") as f:
+        json.dump(d, f, indent=2)
+    os.chmod(tmp, os.stat(cfg).st_mode & 0o777)
+    os.replace(tmp, cfg)
+    print(f"prepared {wt}", file=sys.stderr)
+try:
+    with open(os.path.join(wt, ".mcp.json")) as f:
+        names = list(json.load(f).get("mcpServers", {}))
+except (OSError, ValueError, AttributeError):
+    names = []
+print(json.dumps({"disabledMcpjsonServers": names}))
+PY
+}
+
 case "$mode" in
   clear)
     extra=()
@@ -59,11 +103,18 @@ case "$mode" in
       reload) what="Session reloaded via /reload (MCP servers, settings and plugins reloaded)" ;;
     esac
     prompt="$what in Telegram (conversation resumed). Confirm briefly to the user with the Telegram reply tool and carry on where you were; do not restart again."
-    # The fork starts in the working directory. If the old session was in a
-    # worktree, the new one has to enter it again.
+    # If the old session was last in a worktree, start the fork in it. Letting
+    # the new session call EnterWorktree instead asks for approval in the
+    # terminal only (never via Telegram) when the worktree belongs to another
+    # repo than CLAUDE_TG_CWD ("permission-root relocation"), and an allow
+    # rule doesn't cover that, so the session silently hung.
     wt=$(tail -n 200 "$HOME"/.claude/projects/*/"$old_session".jsonl 2>/dev/null \
-         | grep -o '"cwd":"[^"]*/\.claude/worktrees/[^"]*"' | tail -1 | cut -d'"' -f4)
-    [ -n "$wt" ] && [ -d "$wt" ] && prompt="$prompt You were working in the worktree $wt: enter it again first with EnterWorktree (path=\"$wt\")."
+         | grep -o '"cwd":"[^"]*"' | tail -1 | cut -d'"' -f4)
+    if [[ "$wt" == */.claude/worktrees/* ]] && [ -d "$wt" ]; then
+      start_dir="$wt"
+      extra+=(--settings "$(prepare_worktree "$wt")")
+      prompt="$prompt This session starts in the worktree $wt you were working in: do not call EnterWorktree."
+    fi
     ;;
   resume)
     [[ "$1" =~ ^[0-9a-f-]{36}$ ]] || { tg-send "Invalid session id."; exit 1; }
@@ -115,7 +166,7 @@ srv="${TELEGRAM_SESSION_PID:-$before}"
 [ -z "$adds" ] && [ -n "$srv" ] && printf '{"from": %s}\n' "$srv" > "$HANDOVER"
 # --channels is variadic: keep it before the other options, or it eats the prompt.
 [ -n "$effort" ] && extra+=(--effort "$effort")
-if ! out=$(claude --bg --channels "$CHANNEL" --name telegram --model "$model" \
+if ! out=$(cd "$start_dir" && claude --bg --channels "$CHANNEL" --name telegram --model "$model" \
       --permission-mode "$perm" "${extra[@]}" "$prompt" 2>&1); then
   echo "start failed: $out"
   rm -f "$HANDOVER"
