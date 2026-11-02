@@ -1,13 +1,24 @@
 #!/usr/bin/env bash
-# /force [text] (TELEGRAM_FORCE_CMD): the usage guard no longer applies to the
+# /force [number] [text] (TELEGRAM_FORCE_CMD): the usage guard no longer applies to the
 # session; if it was paused, it continues now (with the text, if given).
 . "$(dirname "$(readlink -f "$0")")/claude-tg-common.sh"
 exec 2>>"$CLAUDE_TG_STATE/session.log"
 echo "=== $(date -Is) force" >&2
 
-sid=$(claude-tg-current | python3 -c "import json,sys; print(json.load(sys.stdin)['sessionId'])")
+# /force 2 [text]: session 2 (with the relay) instead of the one you talk to.
+if [[ "${1:-}" =~ ^#?([0-9]+)$ ]]; then
+  slot=${BASH_REMATCH[1]}; shift
+  sid=$(python3 -c "import json,sys; print(next((s['sessionId'] for s in json.load(open(sys.argv[1]))['sessions'] if s['slot'] == int(sys.argv[2])), ''))" \
+        "$TG_DIR/relay-state.json" "$slot" 2>/dev/null)
+  if [ -z "$sid" ]; then
+    tg-send "/force: no session $slot. See /sessions."
+    exit 1
+  fi
+else
+  sid=$(claude-tg-current | python3 -c "import json,sys; print(json.load(sys.stdin)['sessionId'])")
+fi
 if [ -z "$sid" ]; then
   tg-send "/force failed: no Telegram background session found."
   exit 1
 fi
-tg-send "$(claude-tg-usage-guard force "$sid" "$*")"
+TELEGRAM_SESSION_ID=$sid tg-send "$(claude-tg-usage-guard force "$sid" "$*")"

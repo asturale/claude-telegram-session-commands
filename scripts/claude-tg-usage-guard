@@ -104,15 +104,29 @@ def over_limit(data):
     return None
 
 
-def send(text):
-    subprocess.run([str(BIN / "tg-send"), text], capture_output=True, timeout=30)
+def send(text, sid=""):
+    # TELEGRAM_SESSION_ID: tg-send puts that session's "[🔵 2·opus]" label in front, so the
+    # message reads as the session's own and a reply to it (/force) goes to that session.
+    subprocess.run([str(BIN / "tg-send"), text], capture_output=True, timeout=30,
+                   env={**os.environ, "TELEGRAM_SESSION_ID": sid})
+
+
+def slot(sid):
+    """The session's number with the relay, or None."""
+    try:
+        relay = json.loads((TG_DIR / "relay-state.json").read_text())
+        return next((s["slot"] for s in relay["sessions"] if s.get("sessionId") == sid), None)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def name(sid):
     try:
-        return json.loads((TG_DIR / "session-names.json").read_text()).get(sid) or sid[:8]
+        n = json.loads((TG_DIR / "session-names.json").read_text()).get(sid) or sid[:8]
     except (OSError, ValueError):
-        return sid[:8]
+        n = sid[:8]
+    num = slot(sid)
+    return f"{num}·{n}" if num else n
 
 
 def unit(sid):
@@ -148,9 +162,11 @@ def pause(sid, label, pct, reset):
     rec.write_text(json.dumps({"session": sid, "limit": label, "percent": pct, "resume_at": at}))
     schedule(sid, at)
     fmt = "%a %H:%M" if at - time.time() > 20 * 3600 else "%H:%M"
-    send(f"⏸ Paused \"{name(sid)}\": {label} at {pct:.0f}%. "
+    num = slot(sid)
+    how = f"/force {num} (or reply /force to this message)" if num else "/force in that session"
+    send(f"⏸ Paused session \"{name(sid)}\": {label} at {pct:.0f}%. "
          f"It continues by itself at {datetime.fromtimestamp(at).strftime(fmt)}. "
-         f"/force in that session lets it go on now.")
+         f"{how} lets it go on now.", sid)
 
 
 def agent(sid):
@@ -171,7 +187,8 @@ def hook():
     except ValueError:
         return
     sid = h.get("session_id", "")
-    if (STATE / "off").exists() or ALLOWED.match(h.get("tool_name", "")) or (FORCED / sid).exists():
+    if (STATE / "off").exists() or ALLOWED.match(h.get("tool_name", "")) or (FORCED / sid).exists() \
+            or (sid and (FORCED / sid[:8]).exists()):  # sid[:8]: from "/new /force …"
         return
     hit = over_limit(usage())
     if not hit:
@@ -195,7 +212,7 @@ def resume(sid):
     a = agent(sid)
     rec.unlink()
     if not a:
-        send(f"▶ The limit has reset, but \"{name(sid)}\" no longer runs; nothing resumed.")
+        send(f"▶ The limit has reset, but session \"{name(sid)}\" no longer runs; nothing resumed.")
         return
     hit = over_limit(usage(fresh=True))
     if hit:
@@ -203,7 +220,7 @@ def resume(sid):
         return
     if a.get("state") != "working":  # unless you got it going already
         type_into(a, "The usage limit has reset (usage guard). Carry on with your task where you left off.")
-    send(f"▶ Resumed \"{name(sid)}\".")
+    send(f"▶ Resumed session \"{name(sid)}\".", sid)
 
 
 def force(sid, text=""):

@@ -119,9 +119,12 @@ case "$mode" in
     [ -z "$1" ] && { tg-send "No model given."; exit 1; }
     adds=1
     model="$1"; shift
+    # "/new /force <request>": the usage guard doesn't apply to the new session.
+    req="$*"
+    [[ "$req" =~ ^/force([[:space:]]+(.*))?$ ]] && { force=1; req=${BASH_REMATCH[2]}; }
     extra=()
     prompt="Extra session opened via /new in Telegram, next to the existing ones. The relay has already told the user it is ready: send nothing, just wait for their first message."
-    [ -n "$*" ] && prompt="Extra session opened via /new in Telegram, next to the existing ones, with this request from the user: $*"
+    [ -n "$req" ] && prompt="Extra session opened via /new in Telegram, next to the existing ones, with this request from the user: $req"
     ;;
   close)
     [ -z "$old_id" ] && [ -z "$old_pid" ] && { tg-send "Closing failed: session not found."; exit 1; }
@@ -165,6 +168,9 @@ if ! start && ! retry; then
 fi
 echo "started: $out"
 new_id=$(sed -nE 's/.*backgrounded · ([0-9a-f]+).*/\1/p' <<<"$out" | head -1)
+# The background id is the start of the session id; claude-tg-usage-guard matches on it.
+[ -n "${force:-}" ] && [ -n "$new_id" ] && mkdir -p "$CLAUDE_TG_STATE/usage-guard/force" \
+  && touch "$CLAUDE_TG_STATE/usage-guard/force/$new_id"
 
 # Wait until the new session is online (at most 90 s): its poller took over
 # bot.pid, or, with the relay, it is in the relay's session list. bot.pid alone
