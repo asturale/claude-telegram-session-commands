@@ -43,64 +43,6 @@ echo "old: pid=$old_pid bg=$old_id session=$old_session model=$old_model perm=$o
 model="${old_model:-$CLAUDE_TG_MODEL}"
 perm="${old_perm:-$CLAUDE_TG_PERMISSION_MODE}"
 effort="$old_effort"
-# Prepare a worktree the old session was already in, so a background session
-# can start there without a prompt nobody sees (those only show in the
-# terminal). Prints the --settings JSON to start it with.
-# - trust (stored per worktree path): a git repo or worktree whose trust prompt
-#   was never accepted refuses a background start ("Workspace not trusted").
-# - MCP servers added with `claude mcp add` (local scope) are stored per
-#   project, which for a worktree is its main checkout: the ones of
-#   CLAUDE_TG_CWD are added there, or the session would lose them.
-# - a .mcp.json in the repo asks whether to use its servers: answered "no"
-#   through disabledMcpjsonServers in the returned settings.
-# Only a real linked git worktree in <repo>/.claude/worktrees/, with <repo>
-# inside CLAUDE_TG_CWD, gets that treatment: not just any directory with that
-# name (a cloned repo could contain one).
-is_own_worktree() {
-  local real top git_dir common main
-  real=$(realpath -e "$1" 2>/dev/null) || return 1
-  top=$(git -C "$real" rev-parse --show-toplevel 2>/dev/null) || return 1
-  git_dir=$(git -C "$real" rev-parse --path-format=absolute --git-dir) || return 1
-  common=$(git -C "$real" rev-parse --path-format=absolute --git-common-dir) || return 1
-  main=$(realpath -e "${common%/.git}") || return 1
-  [ "$top" = "$real" ] && [ "$git_dir" != "$common" ] \
-    && [[ "$real" == "$main"/.claude/worktrees/* ]] \
-    && [[ "$main" == "$(realpath -e "$CLAUDE_TG_CWD")"/* ]]
-}
-
-prepare_worktree() {
-  local main
-  main=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
-  python3 - "$1" "${main%/.git}" "$CLAUDE_TG_CWD" <<'PY'
-import json, os, sys, tempfile
-wt, main, home_dir = sys.argv[1:4]
-cfg = os.path.expanduser("~/.claude.json")
-with open(cfg) as f:
-    d = json.load(f)
-projects = d.setdefault("projects", {})
-before = json.dumps(d, sort_keys=True)
-projects.setdefault(wt, {})["hasTrustDialogAccepted"] = True
-mine = projects.get(home_dir, {}).get("mcpServers", {})
-if main and main != home_dir and mine:
-    servers = projects.setdefault(main, {}).setdefault("mcpServers", {})
-    for name, conf in mine.items():
-        servers.setdefault(name, conf)
-if json.dumps(d, sort_keys=True) != before:
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(cfg), prefix=".claude.json.")
-    with os.fdopen(fd, "w") as f:
-        json.dump(d, f, indent=2)
-    os.chmod(tmp, os.stat(cfg).st_mode & 0o777)
-    os.replace(tmp, cfg)
-    print(f"prepared {wt}", file=sys.stderr)
-try:
-    with open(os.path.join(wt, ".mcp.json")) as f:
-        names = list(json.load(f).get("mcpServers", {}))
-except (OSError, ValueError, AttributeError):
-    names = []
-print(json.dumps({"disabledMcpjsonServers": names}))
-PY
-}
-
 case "$mode" in
   clear)
     extra=()
@@ -125,10 +67,14 @@ case "$mode" in
     # rule doesn't cover that, so the session silently hung.
     wt=$(tail -n 200 "$HOME"/.claude/projects/*/"$old_session".jsonl 2>/dev/null \
          | grep -o '"cwd":"[^"]*"' | tail -1 | cut -d'"' -f4)
-    if [[ "$wt" == */.claude/worktrees/* ]] && is_own_worktree "$wt"; then
+    # claude-tg-mcp prepare: trust, MCP servers from CLAUDE_TG_WORKTREE_MCP,
+    # .mcp.json off (see there); exits 1 if it isn't a worktree of your own.
+    if [[ "$wt" == */.claude/worktrees/* ]] && prep=$(claude-tg-mcp prepare "$wt"); then
       start_dir="$wt"
-      extra+=(--settings "$(prepare_worktree "$wt")")
+      extra+=(--settings "$(head -1 <<<"$prep")")
       prompt="$prompt This session starts in the worktree $wt you were working in: do not call EnterWorktree."
+      lacks=$(sed -n 2p <<<"$prep")
+      [ -n "$lacks" ] && prompt="$prompt MCP servers not loaded in this worktree session: ${lacks//,/, }. If you need one, ask the user to send /mcp in Telegram (a command of the Telegram plugin, not the /mcp of Claude Code) and then /reload."
     fi
     ;;
   resume)

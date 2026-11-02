@@ -71,8 +71,10 @@ without a prompt (see [scripts/README.md](../scripts/README.md)).
 That rule doesn't cover entering a worktree of another repo than the one the
 session started in ("permission-root relocation"), which asks again, also in
 the terminal only. So after `/model`, `/mode`, `/effort` or `/reload` a session
-that was in a worktree is started in that worktree directly, instead of
-entering it again.
+that was in a worktree is started in that worktree directly (`claude-tg-mcp
+prepare`: trusted, the repo's `.mcp.json` turned off). Your MCP servers from
+`claude mcp add` don't come along by default: only the ones in
+`CLAUDE_TG_WORKTREE_MCP`, and `/mcp` adds another one (then `/reload`).
 
 Permission prompts also get a **♾ Always allow** button. The channel protocol
 only carries "allow once" and "deny", so the plugin saves the rule itself: it
