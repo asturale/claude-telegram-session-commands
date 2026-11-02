@@ -63,6 +63,11 @@ In `manual` mode, permission prompts already reach Telegram as Allow/Deny
 buttons (upstream behaviour). So `/mode` → manual is a practical way to step
 through something that auto mode refuses, then switch back.
 
+Exception: the prompt for `EnterWorktree`/`ExitWorktree` only appears in the
+terminal, never in Telegram, so a session that switches to a worktree hangs
+silently. Run `scripts/claude-tg-allow-worktree` once to allow both tools
+without a prompt (see [scripts/README.md](../scripts/README.md)).
+
 Permission prompts also get a **♾ Always allow** button. The channel protocol
 only carries "allow once" and "deny", so the plugin saves the rule itself: it
 adds it to `permissions.allow` in `$CLAUDE_PROJECT_DIR/.claude/settings.local.json`

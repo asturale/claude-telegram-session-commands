@@ -44,6 +44,12 @@ liking.
 6. Start it at boot: `crontab -e` and add
    `@reboot $HOME/.local/bin/claude-tg-boot.sh >> $HOME/.local/state/claude-tg/boot.log 2>&1`.
    Start it now by running `claude-tg-boot.sh` once.
+7. Allow the worktree tools without a prompt: `claude-tg-allow-worktree`.
+   Claude Code asks for `EnterWorktree`/`ExitWorktree` only in the terminal;
+   that prompt never reaches Telegram, so a session that switches to a
+   worktree hangs silently until you `/stop` or `/reload` it. The script adds
+   both to `permissions.allow` in `~/.claude/settings.json` (idempotent).
+   Running sessions pick it up without a restart.
 
 The first start of Claude Code in the working directory may ask whether you
 trust the folder. Run `claude` there once by hand and accept, or the unattended
@@ -147,6 +153,11 @@ past the cap. That's why the default is 80% and not 95%.
 - `auto` permission mode isn't available on every plan. Without it, side tasks
   stop at the first permission prompt. Set `CLAUDE_TG_PERMISSION_MODE` to
   `acceptEdits` if so.
+- Not every prompt reaches Telegram. Tool permission prompts do (Allow/Deny
+  buttons), but the one for `EnterWorktree`/`ExitWorktree` only shows in the
+  terminal. The session then looks busy and says nothing. Install step 7
+  avoids it; for anything else that hangs, `claude attach <id>` shows what it
+  waits for.
 - Don't edit `claude-tg-session` while it runs: bash reads scripts as it goes.
 - After a restart through `/model`, `/reload` and so on, the new session sees
   the old conversation. The prompt tells it not to restart again; keep that if
