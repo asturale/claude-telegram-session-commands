@@ -53,6 +53,21 @@ effort="$old_effort"
 #   CLAUDE_TG_CWD are added there, or the session would lose them.
 # - a .mcp.json in the repo asks whether to use its servers: answered "no"
 #   through disabledMcpjsonServers in the returned settings.
+# Only a real linked git worktree in <repo>/.claude/worktrees/, with <repo>
+# inside CLAUDE_TG_CWD, gets that treatment: not just any directory with that
+# name (a cloned repo could contain one).
+is_own_worktree() {
+  local real top git_dir common main
+  real=$(realpath -e "$1" 2>/dev/null) || return 1
+  top=$(git -C "$real" rev-parse --show-toplevel 2>/dev/null) || return 1
+  git_dir=$(git -C "$real" rev-parse --path-format=absolute --git-dir) || return 1
+  common=$(git -C "$real" rev-parse --path-format=absolute --git-common-dir) || return 1
+  main=$(realpath -e "${common%/.git}") || return 1
+  [ "$top" = "$real" ] && [ "$git_dir" != "$common" ] \
+    && [[ "$real" == "$main"/.claude/worktrees/* ]] \
+    && [[ "$main" == "$(realpath -e "$CLAUDE_TG_CWD")"/* ]]
+}
+
 prepare_worktree() {
   local main
   main=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
@@ -110,7 +125,7 @@ case "$mode" in
     # rule doesn't cover that, so the session silently hung.
     wt=$(tail -n 200 "$HOME"/.claude/projects/*/"$old_session".jsonl 2>/dev/null \
          | grep -o '"cwd":"[^"]*"' | tail -1 | cut -d'"' -f4)
-    if [[ "$wt" == */.claude/worktrees/* ]] && [ -d "$wt" ]; then
+    if [[ "$wt" == */.claude/worktrees/* ]] && is_own_worktree "$wt"; then
       start_dir="$wt"
       extra+=(--settings "$(prepare_worktree "$wt")")
       prompt="$prompt This session starts in the worktree $wt you were working in: do not call EnterWorktree."
