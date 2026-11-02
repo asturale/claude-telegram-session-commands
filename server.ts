@@ -952,6 +952,7 @@ bot.command('status', async ctx => {
 //   TELEGRAM_SKILL_CMD   /skill: `<cmd> <value>` (detached) on tap, ℹ️ button
 //                        replies with the stdout of `<cmd> info <value>`;
 //                        `/skill <name> [text]` runs `<cmd> <name> [text]` directly
+//   TELEGRAM_MCP_CMD     /mcp: `<cmd> <value>` (detached) on tap
 // Live:
 //   TELEGRAM_PROGRESS_CMD `<cmd>` every TELEGRAM_PROGRESS_INTERVAL seconds
 //   (default 5) while /progress is followed; stdout is the message text,
@@ -1174,6 +1175,8 @@ const pickers = {
     prompt: 'Side tasks (tap for the result):', empty: 'No side tasks running.' },
   skill: { env: 'TELEGRAM_SKILL_CMD', description: 'Run a skill in the session',
     prompt: 'Run which skill?', empty: 'No skills found.' },
+  mcp: { env: 'TELEGRAM_MCP_CMD', description: 'Add an MCP server to a worktree session',
+    prompt: 'Add which MCP server? (then /reload)', empty: 'The session has all your MCP servers.' },
 }
 
 // Button rows for one page of `<cmd> list [offset]`, or null if it printed none.
@@ -1231,7 +1234,7 @@ for (const [name, pk] of Object.entries(pickers)) {
   })
 }
 
-bot.callbackQuery(/^pick:(resume|tasks|skill):(go|result|stop|page|info):([A-Za-z0-9_.:-]{1,40})$/, async ctx => {
+bot.callbackQuery(/^pick:(resume|tasks|skill|mcp):(go|result|stop|page|info):([A-Za-z0-9_.:-]{1,40})$/, async ctx => {
   if (!(await ownerCallback(ctx))) return
   const [, name, action, value] = ctx.match
   const cmd = process.env[pickers[name as keyof typeof pickers].env]
@@ -1250,6 +1253,12 @@ bot.callbackQuery(/^pick:(resume|tasks|skill):(go|result|stop|page|info):([A-Za-
   if (name === 'resume') {
     await ctx.answerCallbackQuery({ text: 'Resuming…' }).catch(() => {})
     await ctx.editMessageText('Resuming that conversation…').catch(() => {})
+    runDetached(cmd, [value])
+    return
+  }
+  if (name === 'mcp') {
+    await ctx.answerCallbackQuery({ text: `Adding ${value}…` }).catch(() => {})
+    await ctx.editMessageText(`Adding ${value}…`).catch(() => {})
     runDetached(cmd, [value])
     return
   }

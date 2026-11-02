@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""MCP servers and trust for a session that works in a git worktree.
+
+  claude-tg-mcp prepare <dir>  get a worktree ready for a background session
+                               (claude-tg-session, on /model /mode /effort /reload)
+  claude-tg-mcp list           /mcp: your MCP servers the current session lacks,
+                               as `name<TAB>label` lines
+  claude-tg-mcp <name>         /mcp tap: add that server for the session's repo
+
+Claude Code looks up MCP servers added with `claude mcp add` (local scope) per
+project in ~/.claude.json, and for a worktree that project is its main
+checkout. A session that starts in a worktree therefore lacks the servers of
+CLAUDE_TG_CWD. Only the ones in CLAUDE_TG_WORKTREE_MCP (comma-separated,
+default none) are added there automatically, so a coding session doesn't get
+your mail or home automation unless you ask: /mcp adds another one, which the
+session loads after /reload.
+
+`prepare` also marks the worktree as trusted (a background session refuses to
+start in a git repo or worktree whose trust prompt was never accepted, and
+every new worktree counts), and prints two lines: the --settings JSON that
+turns off the servers of the repo's .mcp.json (else a "New MCP server found"
+prompt shows in the terminal only), and the names of your servers the session
+won't have. It only acts on a real linked worktree in <repo>/.claude/worktrees/
+with <repo> inside CLAUDE_TG_CWD, and exits 1 for anything else.
+"""
+import json, os, subprocess, sys, tempfile
+from pathlib import Path
+
+HOME = Path.home()
+BIN = Path(__file__).resolve().parent
+CFG = HOME / ".claude.json"
+
+
+def settings():
+    """CLAUDE_TG_* from ~/.config/claude-tg.env, overridden by the environment."""
+    out = {}
+    try:
+        for line in (HOME / ".config/claude-tg.env").read_text().splitlines():
+            k, sep, v = line.strip().partition("=")
+            if sep and k.startswith("CLAUDE_TG_"):
+                out[k] = v.strip().strip("'\"")
+    except OSError:
+        pass
+    out.update({k: v for k, v in os.environ.items() if k.startswith("CLAUDE_TG_")})
+    return out
+
+
+S = settings()
+TG_CWD = os.path.realpath(S.get("CLAUDE_TG_CWD") or HOME)
+ALLOW = [n.strip() for n in S.get("CLAUDE_TG_WORKTREE_MCP", "").split(",") if n.strip()]
+
+
+def git(d, *args):
+    r = subprocess.run(["git", "-C", d, *args], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def main_checkout(d):
+    """The main checkout of an own worktree d, or None."""
+    real = os.path.realpath(d)
+    if not os.path.isdir(real) or git(real, "rev-parse", "--show-toplevel") != real:
+        return None
+    git_dir = git(real, "rev-parse", "--path-format=absolute", "--git-dir")
+    common = git(real, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if not common.endswith("/.git") or git_dir == common:
+        return None
+    main = os.path.realpath(common[:-len("/.git")])
+    if not real.startswith(main + "/.claude/worktrees/") or not main.startswith(TG_CWD + "/"):
+        return None
+    return main
+
+
+def load():
+    with open(CFG) as f:
+        return json.load(f)
+
+
+def save(d):
+    fd, tmp = tempfile.mkstemp(dir=str(CFG.parent), prefix=".claude.json.")
+    with os.fdopen(fd, "w") as f:
+        json.dump(d, f, indent=2)
+    os.chmod(tmp, CFG.stat().st_mode & 0o777)
+    os.replace(tmp, CFG)
+
+
+def mine(d):
+    return d.get("projects", {}).get(TG_CWD, {}).get("mcpServers", {})
+
+
+def missing(d, main):
+    have = d.get("projects", {}).get(main, {}).get("mcpServers", {})
+    return [n for n in mine(d) if n not in have]
+
+
+def add(d, main, names):
+    servers = d.setdefault("projects", {}).setdefault(main, {}).setdefault("mcpServers", {})
+    added = [n for n in names if n in mine(d) and n not in servers]
+    for n in added:
+        servers[n] = mine(d)[n]
+    return added
+
+
+def prepare(wt):
+    main = main_checkout(wt)
+    if not main:
+        sys.exit(1)
+    real = os.path.realpath(wt)
+    d = load()
+    before = json.dumps(d, sort_keys=True)
+    d.setdefault("projects", {}).setdefault(real, {})["hasTrustDialogAccepted"] = True
+    add(d, main, ALLOW)
+    if json.dumps(d, sort_keys=True) != before:
+        save(d)
+    try:
+        names = list(json.loads((Path(real) / ".mcp.json").read_text()).get("mcpServers", {}))
+    except (OSError, ValueError, AttributeError):
+        names = []
+    print(json.dumps({"disabledMcpjsonServers": names}))
+    print(",".join(missing(d, main)))
+
+
+def session_main():
+    """Main checkout of the worktree the current Telegram session started in."""
+    cur = json.loads(subprocess.run([str(BIN / "claude-tg-current")], capture_output=True, text=True).stdout or "{}")
+    agents = subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True).stdout
+    for a in json.loads(agents or "[]"):
+        if cur.get("id") and a.get("id") == cur["id"]:
+            return main_checkout(a.get("cwd", ""))
+    return None
+
+
+def tg_send(text):
+    subprocess.run([str(BIN / "tg-send"), text])
+
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    if args[:1] == ["prepare"] and len(args) == 2:
+        prepare(args[1])
+    elif args[:1] == ["list"]:
+        main = session_main()
+        for n in (missing(load(), main) if main else []):
+            print(f"{n}\t+ {n}")
+    elif len(args) == 1:
+        main = session_main()
+        if not main:
+            tg_send("This session doesn't work in a worktree: it already has your MCP servers.")
+            sys.exit(1)
+        d = load()
+        if add(d, main, args):
+            save(d)
+            tg_send(f"{args[0]} added for {os.path.basename(main)}. /reload to load it in the session.")
+        else:
+            tg_send(f"{args[0]} is not one of your MCP servers, or the session already has it.")
+    else:
+        print(__doc__)
+        sys.exit(2)
