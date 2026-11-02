@@ -822,6 +822,26 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   }
 })
 
+// Claude Code registers its channel listener a moment after the MCP handshake
+// (about a second later); a channel notification sent before that is dropped.
+// That happens to whatever arrives right at startup: a session opened with
+// /new is handed its prompt and forwards by the relay as soon as it connects,
+// and without the relay, updates that waited while no session was polling.
+// Hold them until shortly after `initialized` (or CHANNEL_READY_MAX_MS, should
+// it never come), then deliver them in order.
+const CHANNEL_GRACE_MS = 3000
+const CHANNEL_READY_MAX_MS = 15000
+let channelReady = false
+const early: Inbound[] = []
+const channelOpen = () => {
+  if (channelReady) return
+  channelReady = true
+  if (early.length) process.stderr.write(`telegram channel: delivering ${early.length} message(s) held during startup\n`)
+  for (const inbound of early.splice(0)) deliverNow(inbound)
+}
+mcp.oninitialized = () => void setTimeout(channelOpen, CHANNEL_GRACE_MS)
+setTimeout(channelOpen, CHANNEL_READY_MAX_MS)
+
 await mcp.connect(new StdioServerTransport())
 
 // When Claude Code closes the MCP connection, stdin gets EOF. Without this
@@ -1300,6 +1320,10 @@ function keep<T>(map: Map<string, T>, key: string, value: T): void {
 }
 
 function deliverNow(inbound: Inbound): void {
+  if (!channelReady) {
+    early.push(inbound)
+    return
+  }
   mcp.notification({ method: 'notifications/claude/channel', params: inbound }).catch(err => {
     process.stderr.write(`telegram channel: failed to deliver inbound to Claude: ${err}\n`)
   })
