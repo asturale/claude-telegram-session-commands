@@ -22,7 +22,7 @@ import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { execFile, execFileSync, spawn } from 'child_process'
-import { join, extname, sep } from 'path'
+import { join, extname, sep, dirname } from 'path'
 import { startRelayClient } from './relay.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
@@ -508,14 +508,40 @@ function permissionRule(tool_name: string, input_preview: string): string | null
       // No relative segments, and never Claude's own settings or git internals:
       // a rule there would let Claude widen its own permissions.
       if (parts.some(s => s === '..' || s === '.' || s === '.claude' || s === '.git')) return null
-      const verb = tool_name === 'Read' ? 'Read' : 'Edit' // Edit covers all file-editing tools
-      // Just this file: a directory glob would also cover nested .git/.claude
+      // Reading: the whole project the file is in (its git repository, else its
+      // directory), so reading the next file there doesn't ask again. Writing:
+      // just this file, since a directory glob would also cover nested .git/.claude
       // directories. "//" = absolute path.
+      if (tool_name === 'Read') {
+        const dir = readScope(p)
+        if (dir) return `Read(/${dir}/**)`
+      }
+      const verb = tool_name === 'Read' ? 'Read' : 'Edit' // Edit covers all file-editing tools
       return `${verb}(/${p})`
     }
     default:
       return WHOLE_TOOLS.has(tool_name) ? tool_name : null
   }
+}
+
+// The directory a Read "Always" covers: the git repository holding `file`
+// (nearest parent with .git, below the home directory). null (rule for the
+// file only) for anything else: a file outside a repository, a repository at
+// or above home, or a path through a dot-directory (.ssh, .aws, .config, …),
+// since those hold keys and other secrets.
+function readScope(file: string): string | null {
+  const home = homedir().replace(/\/+$/, '')
+  // HOME unset or "/": no sensible boundary (and the loop below would not end).
+  if (!home.startsWith('/') || home.split('/').filter(Boolean).length < 1) return null
+  if (!file.startsWith(home + '/')) return null
+  if (file.slice(home.length).split('/').some(s => s.startsWith('.') && s !== '')) return null
+  for (let d = dirname(file); d.length > home.length && d.startsWith(home + '/'); d = dirname(d)) {
+    try {
+      statSync(join(d, '.git'))
+      return RULE_SPECIAL.test(d) || /\s/.test(d) ? null : d
+    } catch {}
+  }
+  return null
 }
 
 // Add `rule` to permissions.allow in the project's settings.local.json.
