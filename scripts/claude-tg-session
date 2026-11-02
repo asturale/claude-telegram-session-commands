@@ -153,15 +153,31 @@ fi
 echo "started: $out"
 new_id=$(sed -nE 's/.*backgrounded · ([0-9a-f]+).*/\1/p' <<<"$out" | head -1)
 
-# Wait until the new poller has taken over bot.pid (at most 90 s).
-for _ in $(seq 1 45); do
+# Wait until the new session is online (at most 90 s): its poller took over
+# bot.pid, or, with the relay, it is in the relay's session list. bot.pid alone
+# misses a session that connects while the relay restarts (after an update of
+# relay.ts), which then keeps the earlier active session.
+online() {
   now=$(cat "$PIDFILE" 2>/dev/null)
-  [ -n "$now" ] && [ "$now" != "$before" ] && break
+  [ -n "$now" ] && [ "$now" != "$before" ] && return 0
+  [ -n "$new_id" ] && python3 - "$TG_DIR/relay-state.json" "$new_id" <<'PY' 2>/dev/null
+import json, sys
+state = json.load(open(sys.argv[1]))
+sys.exit(0 if any(s.get("sessionId", "").startswith(sys.argv[2]) for s in state.get("sessions", [])) else 1)
+PY
+}
+ok=""
+for _ in $(seq 1 45); do
+  online && { ok=1; break; }
   sleep 2
 done
-if [ "$(cat "$PIDFILE" 2>/dev/null)" = "$before" ]; then
+if [ -z "$ok" ]; then
   rm -f "$HANDOVER"
-  tg-send "The new session did not come online within 90 s; the old one stays. Log: $LOG"
+  if [ -n "$adds" ]; then
+    tg-send "The new session did not come online within 90 s. Log: $LOG"
+  else
+    tg-send "The new session did not come online within 90 s; the old one stays. Log: $LOG"
+  fi
   exit 1
 fi
 printf '{"id": "%s", "model": "%s", "perm": "%s", "effort": "%s"}\n' "$new_id" "$model" "$perm" "$effort" \
