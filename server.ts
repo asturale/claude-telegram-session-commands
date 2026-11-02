@@ -1043,7 +1043,7 @@ const actions = [
   { name: 'remember', env: 'TELEGRAM_REMEMBER_CMD', arg: 'required', ack: 'Saving to memory…',
     description: 'Save a note to memory', help: '/remember <text> — save a note to memory' },
   { name: 'force', env: 'TELEGRAM_FORCE_CMD', arg: 'optional', ack: '',
-    description: 'Let the session go past the usage guard', help: '/force [text] — let the session go past the usage guard (resumes it if paused)' },
+    description: 'Let the session go past the usage guard', help: '/force [number] [text] — let this session (or session <number>) go past the usage guard (resumes it if paused)' },
 ]
 
 for (const a of actions) {

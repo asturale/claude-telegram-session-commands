@@ -21,7 +21,11 @@ text = text.strip() or "(empty message)"
 try:
     relay = json.loads((STATE / "relay-state.json").read_text())
     me = int(os.environ.get("TELEGRAM_SESSION_PID", "0"))
-    tag = next((s["label"] for s in relay["sessions"] if s["pid"] == me), "")
+    sid = os.environ.get("TELEGRAM_SESSION_ID", "")  # for callers outside the session, e.g. hooks
+    # The session id wins: background sessions inherit a stale TELEGRAM_SESSION_PID
+    # (that of whichever session started the daemon), which would mislabel the message.
+    tag = next((s["label"] for s in relay["sessions"]
+                if (s.get("sessionId") == sid if sid else s["pid"] == me)), "")
     if relay.get("multi") and tag:
         text = f"[{tag}] {text}"
 except (OSError, ValueError, KeyError, TypeError):

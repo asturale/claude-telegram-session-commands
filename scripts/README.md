@@ -122,7 +122,9 @@ urgent. `claude-tg-usage-guard` keeps the end free:
   next reset.
 - `/force [text]` takes the session out of the guard for the rest of its life
   and, if it was paused, resumes it right away. Use it for the session you
-  need now.
+  need now. With the relay, the pause message carries the session's label and
+  number: reply `/force` to it, or send `/force <number>` from any session.
+  `/new /force <request>` opens a session the guard doesn't apply to.
 
 The limits come from the same endpoint as `/usage` (cached for 3 minutes in
 the same file). If they can't be read, nothing is blocked. To turn it on, add
