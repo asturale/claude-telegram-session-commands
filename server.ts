@@ -531,6 +531,8 @@ function permissionRule(tool_name: string, input_preview: string): string | null
 // since those hold keys and other secrets.
 function readScope(file: string): string | null {
   const home = homedir().replace(/\/+$/, '')
+  // HOME unset or "/": no sensible boundary (and the loop below would not end).
+  if (!home.startsWith('/') || home.split('/').filter(Boolean).length < 1) return null
   if (!file.startsWith(home + '/')) return null
   if (file.slice(home.length).split('/').some(s => s.startsWith('.') && s !== '')) return null
   for (let d = dirname(file); d.length > home.length && d.startsWith(home + '/'); d = dirname(d)) {
