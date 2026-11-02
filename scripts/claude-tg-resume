@@ -374,10 +374,15 @@ if sys.argv[1] == "name":
         n = summarize(f, "Name this session after its topic or goal: one or two words, at most 16 "
                          "characters, lowercase, in the language of the conversation, without quotes "
                          "or punctuation. If the topic isn't clear yet, answer only -. Only the name.",
-                      limit=16)
+                      limit=1000, lines=5)
         subprocess.run(["rm", "-rf", str(project_dir(TITLES.parent / "titles"))])
-        if n and n.strip("-"):
-            print(n)
+        # Only a real name: the model sometimes adds an intro ("Dutch, short: `x`"),
+        # and cutting that off at 16 characters left junk as the name.
+        for line in (n or "").splitlines():
+            line = line.strip().strip("`\"'*.").lower()
+            if re.fullmatch(r"[^\W_]+(?:[ -][^\W_]+)?", line) and len(line) <= 16:
+                print(line)
+                break
     sys.exit(0)
 
 if sys.argv[1] == "recap":
