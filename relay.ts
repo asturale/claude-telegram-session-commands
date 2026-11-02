@@ -137,7 +137,7 @@ type MenuItem = { command: string; description: string; help: string }
 // Bot menu: daily use, managing the session, settings, information, rarely.
 const MENU_ORDER = 'sessions,switch,new,progress,recap,stop,btw,' +
   'clear,resume,name,close,compact,reload,' +
-  'model,effort,mode,skill,' +
+  'model,effort,mode,skill,mcp,' +
   'status,usage,tasks,remember,' +
   'login,help,start'
 

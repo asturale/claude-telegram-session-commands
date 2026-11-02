@@ -86,6 +86,7 @@ For a machine nobody logs in to, use a long-lived token: run
 | `claude-tg-btw` | `/btw` | Side session without the plugin; reports through `tg-send` |
 | `claude-tg-remember` | `/remember` | Short side session that saves a note in Claude's memory |
 | `claude-tg-tasks` | `/tasks` | Lists, shows or stops the side sessions |
+| `claude-tg-mcp` | `claude-tg-session`, `/mcp` | Gets a worktree ready for a restarted session (trust, `.mcp.json` off, the MCP servers in `CLAUDE_TG_WORKTREE_MCP`); `/mcp` lists your other MCP servers as buttons and adds the one you tap |
 | `claude-tg-skill` | `/skill` | Lists the skills you can invoke; types `/<skill> [text]` into the session |
 | `claude-tg-compact`, `claude-tg-stop` | `/compact`, `/stop` | Type `/compact` or Esc into the session |
 | `claude-tg-type` | the two above | Types into a background session through `claude attach` in a pseudo-terminal |
