@@ -69,12 +69,19 @@ case "$mode" in
          | grep -o '"cwd":"[^"]*"' | tail -1 | cut -d'"' -f4)
     # claude-tg-mcp prepare: trust, MCP servers from CLAUDE_TG_WORKTREE_MCP,
     # .mcp.json off (see there); exits 1 if it isn't a worktree of your own.
-    if [[ "$wt" == */.claude/worktrees/* ]] && prep=$(claude-tg-mcp prepare "$wt"); then
-      start_dir="$wt"
-      extra+=(--settings "$(head -1 <<<"$prep")")
-      prompt="$prompt This session starts in the worktree $wt you were working in: do not call EnterWorktree."
-      lacks=$(sed -n 2p <<<"$prep")
-      [ -n "$lacks" ] && prompt="$prompt MCP servers not loaded in this worktree session: ${lacks//,/, }. If you need one, ask the user to send /mcp in Telegram (a command of the Telegram plugin, not the /mcp of Claude Code) and then /reload."
+    if [[ "$wt" == */.claude/worktrees/* ]] && [ -d "$wt" ]; then
+      prep=$(claude-tg-mcp prepare "$wt"); rc=$?
+      if [ "$rc" = 0 ]; then
+        start_dir="$wt"
+        extra+=(--settings "$(head -1 <<<"$prep")")
+        prompt="$prompt This session starts in the worktree $wt you were working in: do not call EnterWorktree."
+        lacks=$(sed -n 2p <<<"$prep")
+        [ -n "$lacks" ] && prompt="$prompt MCP servers not loaded in this worktree session: ${lacks//,/, }. If you need one, ask the user to send /mcp in Telegram (a command of the Telegram plugin, not the /mcp of Claude Code) and then /reload."
+      else
+        # Old way: enter it again (may ask for approval in the terminal only).
+        prompt="$prompt You were working in the worktree $wt: enter it again first with EnterWorktree (path=\"$wt\")."
+        [ "$rc" = 3 ] && tg-send "The session can't start in its worktree directly: the repo $prep isn't trusted yet (run claude there once and accept). It enters the worktree itself, which may wait for approval in the terminal."
+      fi
     fi
     ;;
   resume)
@@ -127,8 +134,17 @@ srv="${TELEGRAM_SESSION_PID:-$before}"
 [ -z "$adds" ] && [ -n "$srv" ] && printf '{"from": %s}\n' "$srv" > "$HANDOVER"
 # --channels is variadic: keep it before the other options, or it eats the prompt.
 [ -n "$effort" ] && extra+=(--effort "$effort")
-if ! out=$(cd "$start_dir" && claude --bg --channels "$CHANNEL" --name telegram --model "$model" \
-      --permission-mode "$perm" "${extra[@]}" "$prompt" 2>&1); then
+start() {
+  out=$(cd "$start_dir" && claude --bg --channels "$CHANNEL" --name telegram --model "$model" \
+      --permission-mode "$perm" "${extra[@]}" "$prompt" 2>&1)
+}
+# A running session can overwrite ~/.claude.json and drop the worktree's trust
+# just set: then prepare it again and retry once.
+retry() {
+  [ "$start_dir" != "$CLAUDE_TG_CWD" ] && grep -q "not trusted" <<<"$out" \
+    && echo "trust lost, retrying: $out" && claude-tg-mcp prepare "$start_dir" >/dev/null && start
+}
+if ! start && ! retry; then
   echo "start failed: $out"
   rm -f "$HANDOVER"
   tg-send "Starting the new session failed, the old one is still running. $(tail -2 <<<"$out")"
