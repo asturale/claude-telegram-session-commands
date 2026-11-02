@@ -68,6 +68,12 @@ terminal, never in Telegram, so a session that switches to a worktree hangs
 silently. Run `scripts/claude-tg-allow-worktree` once to allow both tools
 without a prompt (see [scripts/README.md](../scripts/README.md)).
 
+That rule doesn't cover entering a worktree of another repo than the one the
+session started in ("permission-root relocation"), which asks again, also in
+the terminal only. So after `/model`, `/mode`, `/effort` or `/reload` a session
+that was in a worktree is started in that worktree directly, instead of
+entering it again.
+
 Permission prompts also get a **♾ Always allow** button. The channel protocol
 only carries "allow once" and "deny", so the plugin saves the rule itself: it
 adds it to `permissions.allow` in `$CLAUDE_PROJECT_DIR/.claude/settings.local.json`
