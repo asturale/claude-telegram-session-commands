@@ -78,9 +78,13 @@ case "$mode" in
         lacks=$(sed -n 2p <<<"$prep")
         [ -n "$lacks" ] && prompt="$prompt MCP servers not loaded in this worktree session: ${lacks//,/, }. If you need one, ask the user to send /mcp in Telegram (a command of the Telegram plugin, not the /mcp of Claude Code) and then /reload."
       else
-        # Old way: enter it again (may ask for approval in the terminal only).
-        prompt="$prompt You were working in the worktree $wt: enter it again first with EnterWorktree (path=\"$wt\")."
-        [ "$rc" = 3 ] && tg-send "The session can't start in its worktree directly: the repo $prep isn't trusted yet (run claude there once and accept). It enters the worktree itself, which may wait for approval in the terminal."
+        # Can't start in it (repo not trusted, rc 3, or not a worktree of a
+        # repo inside CLAUDE_TG_CWD, rc 1). Don't let the fork call
+        # EnterWorktree: for a worktree of another repo that asks for approval
+        # in the terminal only, so the session hung after /mode. A cd needs no
+        # approval and creates no trust.
+        prompt="$prompt This session starts in $start_dir, but you were working in the worktree $wt: cd there (Bash) and keep working in it, or use absolute paths. Do not call EnterWorktree: its approval prompt shows only in the terminal, so the session would hang."
+        echo "worktree $wt not prepared (rc $rc${prep:+, untrusted repo $prep}): fork told to cd there"
       fi
     elif [ -n "$wt" ] && [ "$wt" != "$start_dir" ] && [ -d "$wt" ]; then
       # Any other directory the old session had cd'd into: the fork starts in
