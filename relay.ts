@@ -26,14 +26,17 @@
  *                      run /progress in it without switching
  *   /new [#name] [prompt]  `TELEGRAM_NEW_CMD <model> [prompt]` on TELEGRAM_DEFAULT_MODEL,
  *                      named `name` when it connects; a photo or file captioned
- *                      /new … is handed to the new session once it connects
+ *                      /new … is handed to the new session once it connects,
+ *                      as are messages forwarded right after /new (bundled
+ *                      with the prompt by the session, as in server.ts)
  *                      (with TELEGRAM_NEW_MODEL_MENU=1: pick a model first)
  *   /close [n]         close the active session or session n (`TELEGRAM_CLOSE_CMD`)
  *   /switch [n]        switch to session n (no number: the list)
  *   /progress n, /stop n   handed to session n (without a number: the active one)
  *   /name [n] [name]   name the active session or session n (empty: back to the model name)
  *   /2 [text]          text (or a photo or file captioned /2 …) to session 2 only,
- *                      without switching; /2 alone switches to it
+ *                      without switching (forwards sent right after it go
+ *                      there too); /2 alone switches to it
  *   /recap [n|all]     `TELEGRAM_RECAP_CMD <session id>` for the active session,
  *                      session n or all of them: a few lines on where it stands
  *   /login             run TELEGRAM_LOGIN_CMD (`claude auth login`) in a
@@ -323,9 +326,11 @@ async function runRelay(): Promise<void> {
   let lastAutoNew = 0
   const NEW_MODEL_MENU = process.env.TELEGRAM_NEW_MODEL_MENU === '1'
   const READY_MS = 180_000 // a /new session that connects within this is announced
+  const BUNDLE_MS = Number(process.env.TELEGRAM_BUNDLE_MS ?? 800) // as in server.ts
+  const BUNDLE_MAX_MS = 3000
   // Sessions /new is opening: named on connect, announced if they have no prompt,
   // handed `update` (a photo or file captioned /new …) once they're there.
-  let expectReady: { model: string, until: number, name?: string, announce: boolean, update?: Update }[] = []
+  let expectReady: { model: string, until: number, name?: string, announce: boolean, updates: Update[] }[] = []
 
   // One relay at a time.
   try {
@@ -367,7 +372,7 @@ async function runRelay(): Promise<void> {
   let offset = 0
   let exiting = false
   const owners = new Map<string, number>(restart?.owners ?? []) // `${chat}:${message_id}` → client pid
-  const pendingNew = new Map<string, { prompt: string, update?: Update }>() // `${chat}:${message_id}` →
+  const pendingNew = new Map<string, { prompt: string, update?: Update, forwards: Update[] }>() // `${chat}:${message_id}` →
   let waiting: Update[] = []
   let waitTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -523,6 +528,46 @@ async function runRelay(): Promise<void> {
     waitTimer = null
   }
 
+  // Forwards that belong to a relay command. "/new look at this" or "/2 look
+  // at this" sent together with a forwarded message arrives as two updates,
+  // the forward right after the command. Without this the forward would go to
+  // the active session instead of the one the command is for. As in server.ts:
+  // forwards from the same chat within BUNDLE_MS of the previous one (at most
+  // BUNDLE_MAX_MS after the command) are taken; `each` gets them as they come,
+  // `done` all of them once the window closes.
+  let gather: {
+    chat: number, since: number, forwards: Update[], timer: ReturnType<typeof setTimeout>,
+    each?: (u: Update) => void, done?: (forwards: Update[]) => void,
+  } | null = null
+
+  const finishGather = () => {
+    const g = gather
+    if (!g) return
+    gather = null
+    clearTimeout(g.timer)
+    g.done?.(g.forwards)
+  }
+
+  const startGather = (chat: number, opts: { each?: (u: Update) => void, done?: (forwards: Update[]) => void }) => {
+    finishGather()
+    if (BUNDLE_MS <= 0) {
+      opts.done?.([])
+      return
+    }
+    gather = { chat, since: Date.now(), forwards: [], timer: setTimeout(finishGather, BUNDLE_MS), ...opts }
+  }
+
+  const takeForward = (u: Update): boolean => {
+    const m = u.message
+    if (!gather || !m?.forward_origin || m.chat.id !== gather.chat || !owner(m.from?.id)) return false
+    if (Date.now() - gather.since > BUNDLE_MAX_MS) return false
+    gather.forwards.push(u)
+    gather.each?.(u)
+    clearTimeout(gather.timer)
+    gather.timer = setTimeout(finishGather, Math.max(0, Math.min(BUNDLE_MS, gather.since + BUNDLE_MAX_MS - Date.now())))
+    return true
+  }
+
   // ---- relay commands --------------------------------------------------
 
   const sessionsList = async (chat: string) => {
@@ -552,38 +597,47 @@ async function runRelay(): Promise<void> {
   const modelLabel = (value: string) => MODELS.find(x => x.value === value)?.label ?? value
 
   // `text` is what followed /new: an optional #name, then the prompt. With
-  // `update` (a photo or file), the prompt is its caption instead: the session
-  // gets the whole message once it connects.
-  const startNew = (model: string, text: string, update?: Update) => {
+  // `update` (the /new message itself), a photo or file gets the prompt as its
+  // caption and the session gets the whole message once it connects. So does a
+  // text /new that came with `forwards`: the prompt and the forwards arrive
+  // together, and the session bundles them into one message.
+  const startNew = (model: string, text: string, update?: Update, forwards: Update[] = []) => {
     const nm = /^#(\S+)\s*([\s\S]*)$/.exec(text.trim())
     const name = nm ? nm[1].slice(0, 24) : undefined
     const prompt = (nm ? nm[2] : text).trim()
-    if (update?.message) {
-      const msg: Record<string, unknown> = { ...update.message }
+    const updates: Update[] = []
+    const m = update?.message
+    if (m && m.text == null) {
+      const msg: Record<string, unknown> = { ...m }
       if (prompt) msg.caption = prompt
       else delete msg.caption
       delete msg.caption_entities
-      update = { ...update, message: msg } as Update
+      updates.push({ ...update, message: msg } as Update)
+    } else if (m && prompt && forwards.length > 0) {
+      const msg: Record<string, unknown> = { ...m, text: prompt }
+      delete msg.entities
+      updates.push({ ...update, message: msg } as Update)
     }
+    updates.push(...forwards)
     // Without a prompt the session has nothing to say: announce it on connect.
-    expectReady.push({ model, until: Date.now() + READY_MS, name, announce: !prompt && !update, update })
-    void runWith(NEW_CMD!, prompt && !update ? [model, prompt] : [model], active?.pid, true)
+    expectReady.push({ model, until: Date.now() + READY_MS, name, announce: !prompt && updates.length === 0, updates })
+    void runWith(NEW_CMD!, prompt && updates.length === 0 ? [model, prompt] : [model], active?.pid, true)
   }
 
-  const newMenu = async (chat: string, prompt: string, update?: Update) => {
+  const newMenu = async (chat: string, prompt: string, update?: Update, forwards: Update[] = []) => {
     if (!NEW_CMD) {
       await api.sendMessage(chat, '/new is not configured (TELEGRAM_NEW_CMD).').catch(() => {})
       return
     }
     if (!NEW_MODEL_MENU && DEFAULT_MODEL) {
       await api.sendMessage(chat, `Opening a new session on ${modelLabel(DEFAULT_MODEL)}…`).catch(() => {})
-      startNew(DEFAULT_MODEL, prompt, update)
+      startNew(DEFAULT_MODEL, prompt, update, forwards)
       return
     }
     const sent = await api.sendMessage(chat, 'Open a new session on:', {
       reply_markup: { inline_keyboard: [MODELS.map((m, i) => ({ text: m.label, callback_data: `relay:new:${i}` }))] },
     }).catch(() => null)
-    if (sent && (prompt || update)) pendingNew.set(`${chat}:${sent.message_id}`, { prompt, update })
+    if (sent && (prompt || update || forwards.length)) pendingNew.set(`${chat}:${sent.message_id}`, { prompt, update, forwards })
   }
 
   const askClose = async (chat: string, c: Client | null) => {
@@ -747,6 +801,11 @@ async function runRelay(): Promise<void> {
       msg.caption_entities = shift(m.caption_entities)
     }
     deliver(c, { ...u, message: msg } as Update)
+    // Forwards sent along with it go to the same session (which bundles them).
+    startGather(m.chat.id, { each: f => {
+      if (clients.includes(c)) deliver(c, f)
+      else if (active) deliver(active, f)
+    } })
     return true
   }
 
@@ -756,7 +815,7 @@ async function runRelay(): Promise<void> {
     // A photo or file captioned /new …: opens a session that gets it.
     const cn = m.text == null ? /^\/new(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(m.caption ?? '') : null
     if (cn) {
-      await newMenu(String(m.chat.id), (cn[1] ?? '').trim(), u)
+      startGather(m.chat.id, { done: fw => void newMenu(String(m.chat.id), (cn[1] ?? '').trim(), u, fw) })
       return true
     }
     const cm = /^\/(sessions|new|close|name|login|recap|switch|progress|stop)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(m.text ?? '')
@@ -790,7 +849,7 @@ async function runRelay(): Promise<void> {
     if (cm[1] === 'sessions') await sessionsList(chat)
     else if (cm[1] === 'recap') await recapCommand(chat, (cm[2] ?? '').trim())
     else if (cm[1] === 'login') await startLogin(chat)
-    else if (cm[1] === 'new') await newMenu(chat, (cm[2] ?? '').trim())
+    else if (cm[1] === 'new') startGather(m.chat.id, { done: fw => void newMenu(chat, (cm[2] ?? '').trim(), u, fw) })
     else if (cm[1] === 'name') {
       // /name 6 mail: session 6 (/name 6 alone: back to its model name).
       const nm = /^#?(\d+)(?:\s+([\s\S]*))?$/.exec(arg)
@@ -883,7 +942,7 @@ async function runRelay(): Promise<void> {
         pendingNew.delete(key)
         await answer(`Starting ${model.label}…`)
         await edit(`Opening a new session on ${model.label}…`)
-        startNew(model.value, pending?.prompt ?? '', pending?.update)
+        startNew(model.value, pending?.prompt ?? '', pending?.update, pending?.forwards)
         break
       }
       default:
@@ -897,6 +956,9 @@ async function runRelay(): Promise<void> {
   const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 
   const route = async (u: Update) => {
+    if (takeForward(u)) return
+    // Anything else ends the window first, so the order stays as sent.
+    finishGather()
     if (await handleShortcut(u)) return
     if (await handleCommand(u)) return
     if (handleLoginCode(u)) return
@@ -1064,7 +1126,7 @@ async function runRelay(): Promise<void> {
         flushWaiting()
         const c = client
         if (ready?.announce) notify(`Session ${label(c)} is ready (${modelLabel(ready.model)}).`)
-        if (ready?.update) deliver(c, ready.update)
+        for (const r of ready?.updates ?? []) deliver(c, r)
         for (const ms of [0, 5000, 20000, 60000]) setTimeout(() => void refresh(c), ms)
       } else if (msg.t === 'sent' && client) {
         owners.set(`${msg.chat}:${msg.id}`, client.pid)
@@ -1091,7 +1153,7 @@ async function runRelay(): Promise<void> {
       if (autoNew) {
         lastAutoNew = Date.now()
         notify(`Session ${label(c)} closed. Opening a fresh session on ${modelLabel(DEFAULT_MODEL)}…`)
-        expectReady.push({ model: DEFAULT_MODEL, until: Date.now() + READY_MS, announce: true })
+        expectReady.push({ model: DEFAULT_MODEL, until: Date.now() + READY_MS, announce: true, updates: [] })
         void runWith(NEW_CMD!, [DEFAULT_MODEL], undefined, true)
         return
       }
