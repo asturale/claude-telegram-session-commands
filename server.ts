@@ -525,19 +525,21 @@ function permissionRule(tool_name: string, input_preview: string): string | null
 }
 
 // The directory a Read "Always" covers: the git repository holding `file`
-// (nearest parent with .git), else the file's own directory. null (rule for
-// the file only) when that would be the home directory, one of its parents or
-// a top-level directory: those hold keys and other secrets.
+// (nearest parent with .git, below the home directory). null (rule for the
+// file only) for anything else: a file outside a repository, a repository at
+// or above home, or a path through a dot-directory (.ssh, .aws, .config, …),
+// since those hold keys and other secrets.
 function readScope(file: string): string | null {
   const home = homedir().replace(/\/+$/, '')
-  let dir = dirname(file)
-  for (let d = dir; d.length > home.length && d.startsWith(home + '/'); d = dirname(d)) {
-    try { statSync(join(d, '.git')); dir = d; break } catch {}
+  if (!file.startsWith(home + '/')) return null
+  if (file.slice(home.length).split('/').some(s => s.startsWith('.') && s !== '')) return null
+  for (let d = dirname(file); d.length > home.length && d.startsWith(home + '/'); d = dirname(d)) {
+    try {
+      statSync(join(d, '.git'))
+      return RULE_SPECIAL.test(d) || /\s/.test(d) ? null : d
+    } catch {}
   }
-  const depth = dir.split('/').filter(Boolean).length
-  if (depth < 2 || dir === home || home.startsWith(dir + '/')) return null
-  if (RULE_SPECIAL.test(dir) || /\s/.test(dir)) return null
-  return dir
+  return null
 }
 
 // Add `rule` to permissions.allow in the project's settings.local.json.
