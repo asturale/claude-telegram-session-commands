@@ -113,9 +113,14 @@ or week, and then you have nothing left when you need Claude for something
 urgent. `claude-tg-usage-guard` keeps the end free:
 
 - At 80% of the 5-hour window or 90% of the week (`CLAUDE_TG_GUARD_SESSION`,
-  `CLAUDE_TG_GUARD_WEEK` in `~/.config/claude-tg.env`), every tool call is
-  denied except Telegram replies, `ToolSearch` and the task tools. The session
-  tells you where it stands and stops.
+  `CLAUDE_TG_GUARD_WEEK` in `~/.config/claude-tg.env`), heavy work stops:
+  subagents and workflows are denied, and each session may make 30 more tool
+  calls (`CLAUDE_TG_GUARD_BUDGET`): enough for a question, a server task or a
+  small fix.
+- Past that budget, or at 95% / 97% (`CLAUDE_TG_GUARD_HARD_SESSION`,
+  `CLAUDE_TG_GUARD_HARD_WEEK`), every tool call is denied except Telegram
+  replies, `ToolSearch` and the task tools. The session tells you where it
+  stands and stops.
 - You get a message, and a one-shot user timer (`systemd-run --user`, else a
   detached `sleep`) types a "continue" message into the session two minutes
   after the reset. If it is still over a cap then (the week), it waits for the

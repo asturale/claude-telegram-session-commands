@@ -5,10 +5,14 @@
   claude-tg-usage-guard resume <id>  run by the timer at the reset: resume a paused session
   claude-tg-usage-guard force <id>   exempt a session and resume it now (/force)
 
-Once the 5-hour window is at CLAUDE_TG_GUARD_SESSION % or more (default 80), or
-the week at CLAUDE_TG_GUARD_WEEK % (default 90), every tool call is denied
-except Telegram replies, ToolSearch and the task tools. The session tells you
-where it stands and stops, so the rest stays free for whatever you need it for.
+Two caps. Past the soft one (5-hour window at CLAUDE_TG_GUARD_SESSION %, default
+80, or the week at CLAUDE_TG_GUARD_WEEK %, default 90) heavy work stops:
+subagents and workflows are denied, and each session gets CLAUDE_TG_GUARD_BUDGET
+more tool calls (default 30), enough for a question, a server task or a small
+fix. Past the budget, or past the hard cap (CLAUDE_TG_GUARD_HARD_SESSION /
+_HARD_WEEK, default 95 / 97), every tool call is denied except Telegram replies,
+ToolSearch and the task tools. The session tells you where it stands and stops,
+so the rest stays free for whatever you need it for.
 
 The first time a session is stopped it is recorded, you get a Telegram message,
 and a one-shot user timer (systemd-run, else a detached sleep) runs
@@ -30,10 +34,11 @@ ENV_FILE = HOME / ".config/claude-tg.env"
 TG_DIR = Path(os.environ.get("TELEGRAM_STATE_DIR") or HOME / ".claude/channels/telegram")
 USAGE_CACHE = HOME / ".local/state/claude-tg/usage.json"  # shared with claude-tg-usage
 STATE = HOME / ".local/state/claude-tg/usage-guard"
-PAUSED, FORCED = STATE / "paused", STATE / "force"
+PAUSED, FORCED, COUNT = STATE / "paused", STATE / "force", STATE / "count"
 CACHE_S = 180  # the endpoint rate-limits hard
 RESUME_DELAY = 120  # seconds after the reset
 ALLOWED = re.compile(r"^(mcp__plugin_telegram_telegram__.*|ToolSearch|Task(Create|Update|List|Get))$")
+HEAVY = re.compile(r"^(Agent|Task|Workflow)$")  # subagents and workflows: refused past the soft cap
 
 
 def setting(key, default):
@@ -51,6 +56,9 @@ def setting(key, default):
 
 SESSION_MAX = float(setting("CLAUDE_TG_GUARD_SESSION", "80"))
 WEEK_MAX = float(setting("CLAUDE_TG_GUARD_WEEK", "90"))
+HARD_SESSION = float(setting("CLAUDE_TG_GUARD_HARD_SESSION", "95"))
+HARD_WEEK = float(setting("CLAUDE_TG_GUARD_HARD_WEEK", "97"))
+BUDGET = int(setting("CLAUDE_TG_GUARD_BUDGET", "30"))  # tool calls per session past the soft cap
 
 
 def token():
@@ -91,9 +99,10 @@ def usage(fresh=False):
     return st.get("data")
 
 
-def over_limit(data):
-    """(label, percent, reset datetime or None) of the cap that is hit, or None."""
-    for key, label, cap in (("five_hour", "5-hour window", SESSION_MAX), ("seven_day", "weekly limit", WEEK_MAX)):
+def over_limit(data, hard=False):
+    """(label, percent, reset datetime or None) of the soft (or hard) cap that is hit, or None."""
+    caps = (HARD_SESSION, HARD_WEEK) if hard else (SESSION_MAX, WEEK_MAX)
+    for (key, label), cap in zip((("five_hour", "5-hour window"), ("seven_day", "weekly limit")), caps):
         v = (data or {}).get(key) or {}
         if v.get("utilization") is not None and float(v["utilization"]) >= cap:
             try:
@@ -150,7 +159,7 @@ def unschedule(sid):
         subprocess.run(["systemctl", "--user", "stop", f"{unit(sid)}.timer"], capture_output=True)
 
 
-def pause(sid, label, pct, reset):
+def pause(sid, label, pct, reset, why=""):
     """Record the pause once per session, tell you, and schedule the resume."""
     PAUSED.mkdir(parents=True, exist_ok=True)
     rec = PAUSED / f"{sid}.json"
@@ -164,7 +173,7 @@ def pause(sid, label, pct, reset):
     fmt = "%a %H:%M" if at - time.time() > 20 * 3600 else "%H:%M"
     num = slot(sid)
     how = f"/force {num} (or reply /force to this message)" if num else "/force in that session"
-    send(f"⏸ Paused session \"{name(sid)}\": {label} at {pct:.0f}%. "
+    send(f"⏸ Paused session \"{name(sid)}\": {label} at {pct:.0f}%" + (f", {why}" if why else "") + ". "
          f"It continues by itself at {datetime.fromtimestamp(at).strftime(fmt)}. "
          f"{how} lets it go on now.", sid)
 
@@ -190,17 +199,47 @@ def hook():
     if (STATE / "off").exists() or ALLOWED.match(h.get("tool_name", "")) or (FORCED / sid).exists() \
             or (sid and (FORCED / sid[:8]).exists()):  # sid[:8]: from "/new /force …"
         return
-    hit = over_limit(usage())
+    data = usage()
+    hit = over_limit(data)
     if not hit:
         return
     label, pct, reset = hit
-    pause(sid, label, pct, reset)
+    if HEAVY.match(h.get("tool_name", "")) and not (PAUSED / f"{sid}.json").exists():
+        # Past the soft cap: no subagents or workflows, but the session may go on by itself.
+        return deny(f"USAGE GUARD: the {label} is at {pct:.0f}%, so subagents and workflows are off. "
+                    f"Do the work yourself with direct tool calls if it is small, else tell the user it is too "
+                    f"heavy for now (/force lets it go on).")
+    why = ""
+    if over_limit(data, hard=True):
+        label, pct, reset = over_limit(data, hard=True)
+    elif not (PAUSED / f"{sid}.json").exists():
+        n = spend(sid, reset)
+        if n <= BUDGET:
+            return  # small work past the soft cap: chat, server tasks, small fixes
+        why = f"it used its {BUDGET} tool calls past the soft cap"
+    pause(sid, label, pct, reset, why)
     when = reset.astimezone().strftime("%a %H:%M") if reset else "later"
-    reason = (f"USAGE GUARD: the {label} is at {pct:.0f}% (caps: {SESSION_MAX:.0f}% for 5 hours, "
-              f"{WEEK_MAX:.0f}% for the week); the rest is kept free. Tools are blocked in this session. "
-              f"Stop now: send the user one short Telegram reply with where you are and what is left, then end "
-              f"your turn. Don't retry other tools. The session gets a 'continue' message after the reset "
-              f"({when}); the user can send /force to let it go on now.")
+    deny(f"USAGE GUARD: the {label} is at {pct:.0f}%" + (f" and {why}" if why else "") +
+         "; the rest is kept free. Tools are blocked in this session. "
+         f"Stop now: send the user one short Telegram reply with where you are and what is left, then end "
+         f"your turn. Don't retry other tools. The session gets a 'continue' message after the reset "
+         f"({when}); the user can send /force to let it go on now.")
+
+
+def spend(sid, reset):
+    """Count one tool call past the soft cap; the count starts over with each limit window."""
+    COUNT.mkdir(parents=True, exist_ok=True)
+    f, window = COUNT / f"{sid}.json", str(reset)
+    try:
+        st = json.loads(f.read_text())
+    except (OSError, ValueError):
+        st = {}
+    n = st.get("n", 0) + 1 if st.get("window") == window else 1
+    f.write_text(json.dumps({"window": window, "n": n}))
+    return n
+
+
+def deny(reason):
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                              "permissionDecisionReason": reason}}))
 
