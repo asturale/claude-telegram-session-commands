@@ -78,7 +78,7 @@ For a machine nobody logs in to, use a long-lived token: run
 | --- | --- | --- |
 | `claude-tg-boot.sh` | `@reboot` | Waits for the network, starts the loop in `screen` |
 | `claude-tg-loop.sh` | boot script | Foreground session that restarts itself with `--continue` |
-| `claude-tg-session` | `/clear` `/model` `/mode` `/effort` `/reload` `/resume` `/new` `/close` | Starts the replacement, waits for its poller, then stops the old session |
+| `claude-tg-session` | `/clear` `/model` `/mode` `/effort` `/reload` `/resume` `/new` `/close` | Starts the replacement, waits for its poller, then stops the old session (`/mode` first tries Shift+Tab in place, without a restart) |
 | `claude-tg-clear`, `-model`, `-mode`, `-effort`, `-reload`, `-new`, `-close` | the commands above | One-line wrappers around `claude-tg-session` |
 | `claude-tg-current` | most scripts | Finds the session a command is about, prints JSON |
 | `claude-tg-session-info` | `/sessions` | Model and status per session for the relay |
@@ -89,7 +89,7 @@ For a machine nobody logs in to, use a long-lived token: run
 | `claude-tg-mcp` | `claude-tg-session`, `/mcp` | Gets a worktree ready for a restarted session (trust, `.mcp.json` off, the MCP servers in `CLAUDE_TG_WORKTREE_MCP`); `/mcp` lists your other MCP servers as buttons and adds the one you tap |
 | `claude-tg-skill` | `/skill` | Lists the skills you can invoke; types `/<skill> [text]` into the session |
 | `claude-tg-compact`, `claude-tg-stop` | `/compact`, `/stop` | Type `/compact` or Esc into the session |
-| `claude-tg-type` | the two above | Types into a background session through `claude attach` in a pseudo-terminal |
+| `claude-tg-type` | the two above, `/mode`, `/accept` | Types into a background session through `claude attach` in a pseudo-terminal; `--mode` presses Shift+Tab until the permission mode matches (refuses while an approval question is open) |
 | `claude-tg-progress` | `/progress` | Request, steps and latest text from the session transcript |
 | `claude-tg-status` | `/status` | Model, mode, context size and side tasks |
 | `claude-tg-usage` | `/usage` | Plan limits (cached) and today's token use |
@@ -99,6 +99,7 @@ For a machine nobody logs in to, use a long-lived token: run
 | `claude-tg-transcribe` | voice messages | Transcript through whisper.cpp, retried in your language if whisper guessed another, then cleaned up by a small model |
 | `claude-tg-patch-plugin` | every start | Applies `server.ts` and `relay.ts` from this repository to the installed plugin |
 | `claude-tg-usage-guard` | `PreToolUse` hook, timer | Pauses sessions near your plan limits and resumes them after the reset (see below) |
+| `claude-tg-accept` | `/accept` | acceptEdits in place (Shift+Tab) until the session's next turn ends or the time is up (default 30 min), then back; for file edits auto mode denied, which the overrule button can't cover |
 | `claude-tg-force` | `/force` | Takes the session out of the usage guard and resumes it if it was paused |
 | `claude-tg-overrule` | `PermissionDenied` + `PreToolUse` hooks | "Do it anyway" button when auto mode denies a call (see below) |
 | `tg-send` | side sessions, errors | Sends a message to you through the Bot API |

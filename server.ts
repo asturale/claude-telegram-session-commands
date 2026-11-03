@@ -1063,6 +1063,7 @@ bot.command('status', async ctx => {
 //   TELEGRAM_STOP_CMD     `<cmd>`                 /stop: interrupt the current turn
 //   TELEGRAM_RELOAD_CMD   `<cmd>`                 /reload: restart, same conversation
 //   TELEGRAM_REMEMBER_CMD `<cmd> <text>`          /remember: save a note to memory
+//   TELEGRAM_ACCEPT_CMD   `<cmd> [minutes]`       /accept: acceptEdits until the turn ends
 // Reports — waited for (30s), stdout is the reply:
 //   TELEGRAM_USAGE_CMD    `<cmd>`                 /usage
 //   TELEGRAM_STATUS_CMD   `<cmd>`                 appended to /status
@@ -1148,6 +1149,8 @@ const actions = [
     description: 'Restart the session, same conversation', help: '/reload — restart the session, same conversation' },
   { name: 'remember', env: 'TELEGRAM_REMEMBER_CMD', arg: 'required', ack: 'Saving to memory…',
     description: 'Save a note to memory', help: '/remember <text> — save a note to memory' },
+  { name: 'accept', env: 'TELEGRAM_ACCEPT_CMD', arg: 'optional', ack: '',
+    description: 'Accept edits until the turn ends', help: '/accept [minutes] — switch to acceptEdits until the next turn ends (at most 30 min, or <minutes>), then back' },
   { name: 'force', env: 'TELEGRAM_FORCE_CMD', arg: 'optional', ack: '',
     description: 'Let the session go past the usage guard', help: '/force [number] [text] — let this session (or session <number>) go past the usage guard (resumes it if paused)' },
 ]

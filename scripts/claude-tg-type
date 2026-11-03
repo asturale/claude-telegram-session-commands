@@ -1,20 +1,32 @@
 #!/usr/bin/env python3
 """Type a line into a Claude background session, as if you opened it with
 `claude attach` and typed it yourself.
-  claude-tg-type <id> <text>     type the text and press Enter
-  claude-tg-type --key esc <id>  only send Esc (interrupt the turn)
+  claude-tg-type <id> <text>         type the text and press Enter
+  claude-tg-type --key esc <id>      only send Esc (interrupt the turn)
+  claude-tg-type --mode <mode> <id>  press Shift+Tab until the permission mode
+                                     is <mode> (auto, acceptEdits, plan, manual);
+                                     prints "<old mode> <new mode>", exit 1 if
+                                     the mode isn't in the Shift+Tab cycle
 
 There is no CLI command to send input to a --bg session. This runs
 `claude attach` in a pseudo-terminal, waits for the UI, types the text and
 Enter, and closes the attach client again. The session keeps running.
 """
-import os, pty, select, signal, sys, time
+import os, pty, re, select, signal, sys, time
 from pathlib import Path
 
+# Footer text of each mode in the Shift+Tab cycle (auto → manual → accept edits → plan).
+FOOTER = {"auto": "auto mode on", "acceptEdits": "accept edits on", "plan": "plan mode on", "manual": "manual mode on"}
+FOOTER["default"] = FOOTER["manual"]
+
 args = sys.argv[1:]
-key = None
+key = mode = None
 if args[:1] == ["--key"]:
     key, args = {"esc": b"\x1b", "ctrl-c": b"\x03"}[args[1]], args[2:]
+elif args[:1] == ["--mode"]:
+    mode, args = args[1], args[2:]
+    if mode not in FOOTER:
+        sys.exit(f"mode {mode} is not in the Shift+Tab cycle")
 sid, text = args[0], " ".join(args[1:])
 pid, fd = pty.fork()
 if pid == 0:
@@ -34,7 +46,44 @@ def drain(seconds):
     return buf
 
 
+def shown(screen, strict=False):
+    """The mode the footer shows last in this screen output, or None. strict: only
+    a footer drawn whole under the input box counts (the first screen; after a
+    Shift+Tab only the label is redrawn), not the same words in the conversation."""
+    plain = re.sub(rb"\x1b\[[0-9;?>]*[A-Za-z]|\x1b\][^\x07]*\x07", b" ", screen).decode("utf8", "replace")
+    head = r"─\r\s+\S{1,3} " if strict else ""  # right under the input box's bottom rule, after the icon
+    hits = [(x.end(), m) for m, t in FOOTER.items() if m != "default"
+            for x in re.finditer(head + re.escape(t), plain)]
+    if not hits or plain.rfind("to cancel") > max(hits)[0]:
+        return None  # no footer, or a dialog (permission prompt …) is open: Shift+Tab would answer it
+    return max(hits)[1]
+
+
+def close():
+    os.kill(pid, signal.SIGTERM)
+    drain(1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    os.waitpid(pid, 0)
+
+
 screen = drain(6)            # let the UI build up
+if mode:
+    want, old = "manual" if mode == "default" else mode, shown(screen, strict=True)
+    now = old
+    for _ in range(len(FOOTER)):  # one full cycle at most
+        if now == want or now is None:
+            break
+        os.write(fd, b"\x1b[Z")  # Shift+Tab
+        s = shown(drain(1.5))
+        if s is None:  # a dialog opened: another Shift+Tab would answer it
+            break
+        now = s
+    close()
+    print(old, now)
+    sys.exit(0 if now == want else 1)
 if key:
     os.write(fd, key)
     screen += drain(3)
@@ -45,10 +94,4 @@ else:
     drain(3)                 # let the input arrive
 if os.environ.get("CLAUDE_TG_TYPE_DUMP"):
     Path(os.environ["CLAUDE_TG_TYPE_DUMP"]).write_bytes(screen)
-os.kill(pid, signal.SIGTERM)
-drain(1)
-try:
-    os.kill(pid, signal.SIGKILL)
-except ProcessLookupError:
-    pass
-os.waitpid(pid, 0)
+close()
