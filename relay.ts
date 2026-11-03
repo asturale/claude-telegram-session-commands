@@ -140,7 +140,7 @@ type MenuItem = { command: string; description: string; help: string }
 // Bot menu: daily use, managing the session, settings, information, rarely.
 const MENU_ORDER = 'sessions,switch,new,progress,recap,stop,btw,' +
   'clear,resume,name,close,compact,reload,' +
-  'model,effort,mode,skill,mcp,' +
+  'model,effort,mode,accept,skill,mcp,' +
   'status,usage,tasks,remember,' +
   'login,help,start'
 
@@ -938,7 +938,9 @@ async function runRelay(): Promise<void> {
     })
   }
   const noOverruleWhy = (tool: string, input: Record<string, unknown>, cwd: string): string | null => {
-    if (NO_OVERRULE_TOOLS.has(tool)) return 'file edits can\'t be overruled from here; approve in the terminal'
+    if (NO_OVERRULE_TOOLS.has(tool)) return process.env.TELEGRAM_ACCEPT_CMD
+      ? 'file edits can\'t be overruled with a button; send /accept (acceptEdits until the turn ends), then ask for the edit again'
+      : 'file edits can\'t be overruled from here; approve in the terminal'
     if (tool === 'Bash' && typeof input.command === 'string' && mayRunFile(input.command, cwd))
       return 'it runs a file whose contents you can\'t see here; approve in the terminal'
     return null

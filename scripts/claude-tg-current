@@ -88,7 +88,8 @@ for f in (SESSIONS / f"{out['id']}.json", STATE):
         continue
     if out["id"] and st.get("id") == out["id"]:
         out["model"] = out["model"] or st.get("model", "")
-        out["perm"] = out["perm"] or st.get("perm", "")
+        # The state file wins: /mode switches in place (Shift+Tab) without a new command line.
+        out["perm"] = st.get("perm", "") or out["perm"]
         out["effort"] = st.get("effort", "")
         break
 print(json.dumps(out))

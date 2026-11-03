@@ -3,7 +3,9 @@
 # plugin through the TELEGRAM_*_CMD variables (see telegram.env.example).
 #   claude-tg-session clear [prompt]       fresh session (same model and mode)
 #   claude-tg-session model <model>        same conversation (fork) on another model
-#   claude-tg-session mode <mode>          same conversation (fork) in another permission mode
+#   claude-tg-session mode <mode>          another permission mode: Shift+Tab in place,
+#                                          else same conversation (fork) in that mode
+#   claude-tg-session mode-inplace <mode>  only the Shift+Tab part (exit 1 if it can't)
 #   claude-tg-session effort <level>       same conversation (fork) with another effort level
 #   claude-tg-session reload               same conversation (fork), everything reloaded
 #   claude-tg-session resume <session-id>  an earlier conversation (fork): with the relay
@@ -43,6 +45,23 @@ echo "old: pid=$old_pid bg=$old_id session=$old_session model=$old_model perm=$o
 model="${old_model:-$CLAUDE_TG_MODEL}"
 perm="${old_perm:-$CLAUDE_TG_PERMISSION_MODE}"
 effort="$old_effort"
+
+# /mode first tries Shift+Tab in the running session: no restart, a running turn
+# keeps going. mode-inplace does only that (exit 1 if it can't, e.g. a dialog is
+# open or the mode isn't in the Shift+Tab cycle); mode falls back to a fork.
+if [ "$mode" = mode ] || [ "$mode" = mode-inplace ]; then
+  [ -z "$1" ] && { tg-send "No mode given."; exit 1; }
+  if [ -n "$old_id" ] && claude-tg-type --mode "$1" "$old_id"; then
+    printf '{"id": "%s", "model": "%s", "perm": "%s", "effort": "%s"}\n' "$old_id" "$old_model" "$1" "$effort" \
+      > "$SESSIONS/$old_id.json"
+    python3 -c "import json,sys; f=sys.argv[1]; s=json.load(open(f)); s['id']==sys.argv[2] and json.dump(dict(s, perm=sys.argv[3]), open(f,'w'))" \
+      "$STATE" "$old_id" "$1" 2>/dev/null
+    [ "$mode" = mode ] && tg-send "Permission mode is now $1 (switched in place, no restart)."
+    exit 0
+  fi
+  [ "$mode" = mode-inplace ] && exit 1
+  echo "in-place switch failed: restarting the session in mode $1"
+fi
 case "$mode" in
   clear)
     extra=()

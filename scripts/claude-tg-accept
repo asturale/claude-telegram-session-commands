@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# /accept [minutes] (TELEGRAM_ACCEPT_CMD): switch the session to acceptEdits for
+# a while, through Shift+Tab (no restart), so a file edit that auto mode denied
+# can go through. Switches back to the previous mode as soon as the session's
+# next turn ends, or after <minutes> (default 30, at most 120), whichever is first.
+. "$(dirname "$(readlink -f "$0")")/claude-tg-common.sh"
+exec >>"$CLAUDE_TG_STATE/session.log" 2>&1
+echo "=== $(date -Is) accept $*"
+
+mins=${1:-30}
+if ! [[ "$mins" =~ ^[0-9]+$ ]] || [ "$mins" -lt 1 ] || [ "$mins" -gt 120 ]; then
+  tg-send "Usage: /accept [minutes], 1 to 120 (default 30)."
+  exit 1
+fi
+cur=$(claude-tg-current)
+get() { python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('$1',''))" "$cur"; }
+id=$(get id); prev=$(get perm); prev=${prev:-${CLAUDE_TG_PERMISSION_MODE:-auto}}
+[ -z "$id" ] && { tg-send "/accept failed: no Telegram background session found."; exit 1; }
+[ "$prev" = acceptEdits ] && { tg-send "The session is already on acceptEdits."; exit 0; }
+
+if ! claude-tg-session mode-inplace acceptEdits; then
+  tg-send "/accept failed: couldn't switch in place (is an approval question open?). /mode restarts the session instead."
+  exit 1
+fi
+tg-send "acceptEdits on: file edits go through without auto-mode checks. Back to $prev when the session's next turn ends, at most $mins min."
+
+# claude agents --json: status busy/waiting while a turn runs, idle after it.
+status() { claude agents --json 2>/dev/null | python3 -c "import json,sys; print(next((a.get('status') or '' for a in json.load(sys.stdin) if a['id']==sys.argv[1]), 'gone'))" "$id"; }
+perm_now() { python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('perm',''))" "$CLAUDE_TG_STATE/sessions/$id.json" 2>/dev/null; }
+# A short turn can start and end between two polls, so a changed transcript counts too.
+transcript=$(ls ~/.claude/projects/*/"$(get sessionId)".jsonl 2>/dev/null | head -1)
+mtime() { stat -c %Y "$transcript" 2>/dev/null || echo 0; }
+sleep 2; base=$(mtime)  # after the Shift+Tab has been written down
+deadline=$(( $(date +%s) + mins * 60 )); was_busy=""
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  sleep 5
+  s=$(status)
+  [ "$s" = gone ] && { echo "accept: session $id is gone"; exit 0; }
+  [ "$(perm_now)" != acceptEdits ] && { echo "accept: mode changed by someone else, leaving it"; exit 0; }
+  case "$s" in
+    busy|waiting) was_busy=1 ;;
+    idle) { [ -n "$was_busy" ] || [ "$(mtime)" -gt "$base" ]; } && break ;;
+  esac
+done
+
+# Back. An open approval question blocks Shift+Tab: keep trying for 10 minutes.
+for _ in $(seq 120); do
+  [ "$(status)" = gone ] && exit 0
+  [ "$(perm_now)" != acceptEdits ] && exit 0
+  claude-tg-session mode-inplace "$prev" && { tg-send "Back to $prev."; exit 0; }
+  sleep 5
+done
+tg-send "⚠️ Couldn't switch back to $prev: the session is still on acceptEdits. Send /mode."
+exit 1
