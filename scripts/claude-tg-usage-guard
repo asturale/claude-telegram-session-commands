@@ -77,9 +77,13 @@ def usage(fresh=False):
     except (OSError, ValueError):
         st = {}
     now = time.time()
-    if not fresh and st.get("data") and now - st.get("fetched", 0) < CACHE_S:
+    # A cache from the future or a far-off retry_at can't be real: don't let an edited
+    # file switch the guard off for good.
+    fetched = st.get("fetched", 0)
+    if not fresh and st.get("data") and 0 <= now - fetched < CACHE_S:
         return st["data"]
-    if now < st.get("retry_at", 0) or not token():
+    retry_at = st.get("retry_at", 0)
+    if (now < retry_at <= now + 3600) or not token():
         return st.get("data")
     req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage", headers={
         "Authorization": f"Bearer {token()}", "anthropic-beta": "oauth-2025-04-20"})

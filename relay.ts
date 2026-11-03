@@ -889,6 +889,17 @@ async function runRelay(): Promise<void> {
       ? command + (Object.keys(other).length ? `\n\n${JSON.stringify(other)}` : '')
       : JSON.stringify(fields, null, 1))
   }
+  // Calls an overrule can't safely cover: Claude Code still runs the classifier on
+  // file-edit tools after a hook "allow" (so the button would only burn a ticket), and a
+  // command that runs a file approves its name, not the contents Claude can still change.
+  const NO_OVERRULE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
+  const RUNS_A_FILE = /(?:^|[\s;&|(`])(?:(?:ba|z|da|k)?sh|python[\d.]*|node|bun|deno|perl|ruby|php|source|\.)\s+(?:-\S+\s+)*(?!-)[^\s<|;&]+|(?:^|[\s;&|(`])\.{0,2}\/[^\s<|;&]+\.(?:sh|py|js|ts|mjs|pl|rb)\b/
+  const noOverruleWhy = (tool: string, input: Record<string, unknown>): string | null => {
+    if (NO_OVERRULE_TOOLS.has(tool)) return 'file edits can\'t be overruled from here; approve in the terminal'
+    if (tool === 'Bash' && typeof input.command === 'string' && RUNS_A_FILE.test(input.command))
+      return 'it runs a file whose contents you can\'t see here; approve in the terminal'
+    return null
+  }
   const overruleAsk = async (msg: Msg) => {
     const sessionId = String(msg.session_id ?? '')
     const tool = String(msg.tool_name ?? '')
@@ -904,6 +915,13 @@ async function runRelay(): Promise<void> {
     // The reason comes from the hook, i.e. from the session's side: shown, but marked as such.
     const reason = visible(String(msg.reason ?? '?')).slice(0, 300)
     const body = overruleShow(tool, inp)
+    const why = noOverruleWhy(tool, inp)
+    if (why) {
+      overruleAsks.delete(id)
+      await api.sendMessage(chat, `[${label(c)}] 🛑 Auto mode denied ${tool}:\n\n${body.slice(0, 1500)}\n\nReason (as reported): ${reason}\n\nNo overrule: ${why}.`)
+        .catch(err => log(`overrule message failed: ${err}`))
+      return
+    }
     if (body.length > 3000) {
       // Too long to review on a phone: no button rather than a cut-off approval.
       overruleAsks.delete(id)
@@ -923,6 +941,8 @@ async function runRelay(): Promise<void> {
     const input = msg.tool_input
     if (!input || typeof input !== 'object' || Array.isArray(input)) return false
     const key = overruleKey(String(msg.session_id ?? ''), String(msg.tool_name ?? ''), input as Record<string, unknown>)
+    const now = Date.now()
+    for (const [k, t] of overruleTickets) if (t <= now) overruleTickets.delete(k)
     const until = overruleTickets.get(key)
     if (until == null) return false
     overruleTickets.delete(key)

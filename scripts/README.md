@@ -163,6 +163,11 @@ with "✅ Do it anyway" and "❌ No":
   hook asks the relay, which uses the ticket up and allows it.
 - No: the session is told not to retry. Unanswered requests expire after 30
   minutes.
+- No button for `Write`/`Edit`/`MultiEdit`/`NotebookEdit` (Claude Code still runs
+  the classifier on file edits after a hook allows them, so the ticket would only be
+  burned) and for commands that run a file (`bash x.sh`, `python3 x.py`, `./x.sh`,
+  `source …`): you'd approve the file name, not the contents, which can still change.
+  Approve those in the terminal.
 
 The hook only passes Claude Code's data to the relay over its socket. The
 relay builds the message and the ticket key from the same input, so what you

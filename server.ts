@@ -443,17 +443,23 @@ const PROJECT_DIR = process.env.CLAUDE_PROJECT_DIR
 // arguments". Only commands with no flag that runs another program or writes
 // files: no git diff/log/show (external diff/textconv), no rg (--pre), no tree
 // (-o), no build or test runners (they run project code), no interpreters.
+// Nothing that prints file contents or secrets with any argument either (cat,
+// head, tail, grep, docker inspect/logs): with a prefix rule those read ~/.ssh,
+// credentials and .env files too. They get an exact rule instead.
 const SAFE_PREFIXES: Record<string, string[]> = {
   git: ['status'],
-  ls: [], cat: [], head: [], tail: [], wc: [], grep: [], pwd: [], which: [],
+  ls: [], wc: [], pwd: [], which: [],
   df: [], du: [], ps: [], stat: [], uptime: [], free: [],
-  docker: ['ps', 'logs', 'images', 'inspect', 'stats'],
+  docker: ['ps', 'images', 'stats'],
   systemctl: ['status', 'list-units', 'list-timers', 'is-active'],
   journalctl: [],
 }
 // Built-in tools whose input has no rule syntax and whose blanket allow grants
-// nothing beyond what other rules already gate.
-const WHOLE_TOOLS = new Set(['WebSearch', 'Glob', 'Grep', 'LS', 'TodoWrite', 'Agent', 'Task', 'NotebookRead'])
+// nothing beyond what other rules already gate. Not Grep/Glob/LS/NotebookRead:
+// allowed whole they read or list every file on disk.
+const WHOLE_TOOLS = new Set(['WebSearch', 'TodoWrite', 'Agent', 'Task'])
+// MCP tools that run code, change things in the world or delete: never "always".
+const RISKY_MCP = /unsafe|run_code|evaluate|exec|eval|call_service|bulk|restart|delete|remove|send|reply|publish|deploy|write|create|update|set_|_set|push|merge|transfer|pay/i
 // Rule syntax characters: parentheses end the rule, * ? [ ] { } are globs.
 const RULE_SPECIAL = /[()*?[\]{}\\'"]/
 
@@ -462,7 +468,7 @@ const RULE_SPECIAL = /[()*?[\]{}\\'"]/
 // shortened). Returns null when no safe rule can be derived; then the request
 // only gets Allow/Deny.
 function permissionRule(tool_name: string, input_preview: string): string | null {
-  if (tool_name.startsWith('mcp__')) return tool_name
+  if (tool_name.startsWith('mcp__')) return RISKY_MCP.test(tool_name.split('__').slice(2).join('__')) ? null : tool_name
   if (input_preview.includes('⋯') || input_preview.includes('…')) return null
   let input: Record<string, unknown> = {}
   const trimmed = input_preview.trim()
@@ -509,9 +515,11 @@ function permissionRule(tool_name: string, input_preview: string): string | null
       const p = str('file_path') ?? str('notebook_path')
       if (!p || !p.startsWith('/') || RULE_SPECIAL.test(p) || /[\s\n\r]/.test(p)) return null
       const parts = p.split('/')
-      // No relative segments, and never Claude's own settings or git internals:
-      // a rule there would let Claude widen its own permissions.
-      if (parts.some(s => s === '..' || s === '.' || s === '.claude' || s === '.git')) return null
+      // No relative segments and no dot files or directories (.claude, .git, .ssh,
+      // .bashrc, .env, .local/bin, .github/workflows, .mcp.json ...), and nothing in a
+      // bin directory: a rule there lets Claude widen its own permissions, run code
+      // later or read secrets.
+      if (parts.some(s => s === '..' || s.startsWith('.') || s === 'bin')) return null
       // Reading: the whole project the file is in (its git repository, else its
       // directory), so reading the next file there doesn't ask again. Writing:
       // just this file, since a directory glob would also cover nested .git/.claude
@@ -542,6 +550,8 @@ function readScope(file: string): string | null {
   for (let d = dirname(file); d.length > home.length && d.startsWith(home + '/'); d = dirname(d)) {
     try {
       statSync(join(d, '.git'))
+      // A repo-wide read rule would also cover its .env files: then only this file.
+      if (readdirSync(d).some(f => /^\.env(\.|$)/.test(f) && f !== '.env.example')) return null
       return RULE_SPECIAL.test(d) || /\s/.test(d) ? null : d
     } catch {}
   }
@@ -579,6 +589,18 @@ function addAllowRule(rule: string): string {
   return file
 }
 
+// What an "Always" rule really allows, in words, shown before the tap.
+function describeRule(rule: string): string {
+  let m: RegExpExecArray | null
+  if (rule.startsWith('mcp__')) return 'every call to this tool, with any arguments'
+  if ((m = /^Read\(\/(\/.*)\/\*\*\)$/.exec(rule))) return `reading every file under ${m[1]}`
+  if ((m = /^(Read|Edit)\(\/(\/.*)\)$/.exec(rule))) return `${m[1] === 'Read' ? 'reading' : 'editing'} this one file`
+  if ((m = /^Bash\((.*):\*\)$/.exec(rule))) return `every "${m[1]} …" command, with any arguments`
+  if (rule.startsWith('Bash(')) return 'only this exact command'
+  if ((m = /^WebFetch\(domain:(.*)\)$/.exec(rule))) return `fetching any URL on ${m[1]}`
+  return `the ${rule} tool, always`
+}
+
 function permissionKeyboard(request_id: string, rule: string | null, withMore: boolean): InlineKeyboard {
   const keyboard = new InlineKeyboard()
   if (withMore) keyboard.text('See more', `perm:more:${request_id}`)
@@ -606,7 +628,7 @@ mcp.setNotificationHandler(
     const rule = ALWAYS_ENABLED && PROJECT_DIR ? permissionRule(tool_name, input_preview) : null
     pendingPermissions.set(request_id, { tool_name, description, input_preview, rule })
     const access = loadAccess()
-    const text = `🔐 Permission: ${tool_name}` + (rule ? `\n♾ Always allow adds: ${rule}` : '')
+    const text = `🔐 Permission: ${tool_name}` + (rule ? `\n♾ Always allow adds: ${rule}\n   = ${describeRule(rule)}` : '')
     const keyboard = permissionKeyboard(request_id, rule, true)
     for (const chat_id of access.allowFrom) {
       void bot.api.sendMessage(chat_id, text, { reply_markup: keyboard }).catch(e => {
@@ -1521,7 +1543,7 @@ bot.on('callback_query:data', async ctx => {
       `tool_name: ${tool_name}\n` +
       `description: ${description}\n` +
       `input_preview:\n${prettyInput}` +
-      (rule ? `\n\n♾ Always allow adds: ${rule}` : '')
+      (rule ? `\n\n♾ Always allow adds: ${rule}\n   = ${describeRule(rule)}` : '')
     const keyboard = permissionKeyboard(request_id, rule, false)
     await ctx.editMessageText(expanded, { reply_markup: keyboard }).catch(() => {})
     await ctx.answerCallbackQuery().catch(() => {})
@@ -1556,7 +1578,7 @@ bot.on('callback_query:data', async ctx => {
   // twice and the chat history shows what was chosen.
   const msg = ctx.callbackQuery.message
   if (msg && 'text' in msg && msg.text) {
-    const shown = msg.text.replace(/\n+♾ Always allow adds: .*$/m, '')
+    const shown = msg.text.replace(/\n+♾ Always allow adds: .*(?:\n {3}= .*)?/, '')
     await ctx.editMessageText(`${shown}\n\n${label}`).catch(() => {})
   }
 })
