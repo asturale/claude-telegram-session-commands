@@ -473,12 +473,16 @@ function mayRunFile(tokens: string[]): boolean {
   if (first.includes('/') || first.startsWith('~')) return true
   // Any word with a slash or a script extension that is (or might be) a runnable file:
   // fail closed when the path can't be checked.
-  return tokens.slice(1).some(t => {
+  // A path also hides behind "=" (git -c x=/path) or a glued short option (-I/path).
+  const words = tokens.slice(1).flatMap(t => t.split('=')).map(t => t.replace(/^-[A-Za-z]+(?=\/)/, ''))
+  return words.some(t => {
     if (/\.(?:sh|py|js|mjs|cjs|ts|pl|rb|php|lua)$/.test(t)) return true
     if (!t.includes('/')) return false
     const p = t.startsWith('/') ? t : t.startsWith('~/') ? join(homedir(), t.slice(2)) : PROJECT_DIR ? join(PROJECT_DIR, t) : ''
     if (!p) return true
-    try { const st = statSync(p); return st.isFile() && (st.mode & 0o111) !== 0 } catch { return false }
+    // Only an existing directory or non-executable regular file is safe; a missing
+    // path could become a script after the rule exists.
+    try { const st = statSync(p); return !(st.isDirectory() || (st.isFile() && (st.mode & 0o111) === 0)) } catch { return true }
   })
 }
 
@@ -587,11 +591,11 @@ function hookTargets(): Set<string> | null {
     for (const groups of Object.values(hooks)) for (const g of (Array.isArray(groups) ? groups : []))
       for (const h of (Array.isArray(g?.hooks) ? g.hooks : [])) if (typeof h?.command === 'string')
         for (const raw of h.command.split(/\s+/)) {
-          const w = raw.replace(/^['"]+|['"]+$/g, '')
+          const w = raw.replace(/['"]/g, '')
             .replace(/\$\{?CLAUDE_PROJECT_DIR\}?/g, PROJECT_DIR ?? '\0')
             .replace(/\$\{?HOME\}?/g, homedir())
             .replace(/^~(?=\/)/, homedir())
-          if (/\$|\0/.test(w)) return null
+          if (/[$\0`\\*?[\]{}()]/.test(w)) return null
           if (w.includes('/')) out.add(realOrSelf(w.startsWith('/') ? w : join(PROJECT_DIR ?? homedir(), w)))
         }
   }
