@@ -1918,6 +1918,8 @@ else void (async () => {
   for (let attempt = 1; ; attempt++) {
     try {
       await bot.start({
+        // Explicit, because Telegram remembers the filter of whoever polled last (see relay.ts).
+        allowed_updates: ['message', 'callback_query'],
         onStart: info => {
           attempt = 0
           botUsername = info.username

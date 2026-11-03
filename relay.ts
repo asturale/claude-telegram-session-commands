@@ -1360,7 +1360,9 @@ async function runRelay(): Promise<void> {
 
   for (let attempt = 1; !exiting; attempt++) {
     try {
-      const updates = await api.getUpdates({ offset, timeout: 30 })
+      // Telegram keeps the last allowed_updates any getUpdates caller sent for this token. Another
+      // tool polling with ['message'] would silently stop button taps, so always ask for both.
+      const updates = await api.getUpdates({ offset, timeout: 30, allowed_updates: ['message', 'callback_query'] })
       attempt = 0
       for (const u of updates) {
         offset = u.update_id + 1
