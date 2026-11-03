@@ -861,11 +861,60 @@ async function runRelay(): Promise<void> {
     return true
   }
 
-  // "Do it anyway" / "No" under an auto-mode denial (scripts/claude-tg-overrule).
-  // The hook left overrule/<id>.json ({key, tool, session_id, at}). Yes: a
-  // one-time ticket tickets/<key> that the hook's PreToolUse side consumes,
-  // and the session is told to retry. Only the owner's tap counts.
-  const OVERRULE_DIR = join(STATE_DIR, 'overrule')
+  // Overrule an auto-mode denial (scripts/claude-tg-overrule). Everything lives
+  // here, in memory: the hook only passes on what Claude Code gave it. The
+  // message and the key are made from the same tool_input, so what the owner
+  // sees is what gets allowed, and a session can't write itself a ticket.
+  const overruleAsks = new Map<string, { key: string, tool: string, sessionId: string, at: number }>()
+  const overruleTickets = new Map<string, number>() // key → expiry (ms)
+  const stable = (v: unknown): unknown =>
+    Array.isArray(v) ? v.map(stable)
+      : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, stable((v as Record<string, unknown>)[k])]))
+      : v
+  // Same session, tool and input (minus the free-text description) = same call.
+  const overruleKey = (sessionId: string, tool: string, input: Record<string, unknown>) => {
+    const { description: _, ...rest } = input
+    return createHash('sha256').update(JSON.stringify([sessionId, tool, stable(rest)])).digest('hex')
+  }
+  const overruleShow = (tool: string, input: Record<string, unknown>) => {
+    const { description: _, ...rest } = input
+    const { command, ...other } = rest
+    let body = tool === 'Bash' && typeof command === 'string'
+      ? command + (Object.keys(other).length ? `\n\n${JSON.stringify(other)}` : '')
+      : JSON.stringify(rest, null, 1)
+    if (body.length > 3000) body = body.slice(0, 3000) + '\n[… cut off; the full call is what gets allowed]'
+    return body
+  }
+  const overruleAsk = async (msg: Msg) => {
+    const sessionId = String(msg.session_id ?? '')
+    const tool = String(msg.tool_name ?? '')
+    const input = msg.tool_input
+    const c = clients.find(x => x.sessionId === sessionId && sessionId && !x.replaced)
+    const chat = ownerChats()[0]
+    if (!c || !tool || !chat || !input || typeof input !== 'object' || Array.isArray(input)) return
+    const now = Date.now()
+    for (const [id, a] of overruleAsks) if (now - a.at > 30 * 60_000) overruleAsks.delete(id)
+    const id = createHash('sha256').update(`${now}${Math.random()}`).digest('hex').slice(0, 12)
+    const inp = input as Record<string, unknown>
+    overruleAsks.set(id, { key: overruleKey(sessionId, tool, inp), tool, sessionId, at: now })
+    const reason = String(msg.reason ?? '?').slice(0, 500)
+    await api.sendMessage(chat, `[${label(c)}] 🛑 Auto mode denied ${tool}:\n\n${overruleShow(tool, inp)}\n\nReason: ${reason}\n\nAllow this exact call once?`, {
+      reply_markup: { inline_keyboard: [[
+        { text: '✅ Do it anyway', callback_data: `ovr:yes:${id}` },
+        { text: '❌ No', callback_data: `ovr:no:${id}` },
+      ]] },
+    }).catch(err => log(`overrule message failed: ${err}`))
+  }
+  // A PreToolUse check: true once for a ticketed call, then the ticket is gone.
+  const overruleUse = (msg: Msg): boolean => {
+    const input = msg.tool_input
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return false
+    const key = overruleKey(String(msg.session_id ?? ''), String(msg.tool_name ?? ''), input as Record<string, unknown>)
+    const until = overruleTickets.get(key)
+    if (until == null) return false
+    overruleTickets.delete(key)
+    return until > Date.now()
+  }
   const handleOverrule = async (u: Update): Promise<boolean> => {
     const q = u.callback_query
     const m = /^ovr:(yes|no):([0-9a-f]{12})$/.exec(q?.data ?? '')
@@ -875,29 +924,21 @@ async function runRelay(): Promise<void> {
       await answer('Not authorized.')
       return true
     }
-    const reqFile = join(OVERRULE_DIR, `${m[2]}.json`)
-    let req: { key?: unknown, tool?: unknown, session_id?: unknown, at?: unknown }
-    try {
-      req = JSON.parse(readFileSync(reqFile, 'utf8'))
-      rmSync(reqFile) // one answer per request
-    } catch {
+    const req = overruleAsks.get(m[2])
+    overruleAsks.delete(m[2]) // one answer per request
+    if (!req || Date.now() - req.at > 30 * 60_000) {
       await answer('Expired or already answered.')
       return true
     }
-    const fresh = typeof req.at === 'number' && Date.now() / 1000 - req.at < 30 * 60
-    if (!fresh || typeof req.key !== 'string' || !/^[0-9a-f]{64}$/.test(req.key)) {
-      await answer('Expired.')
-      return true
-    }
     const yes = m[1] === 'yes'
-    if (yes) writeFileSync(join(OVERRULE_DIR, 'tickets', req.key), String(Date.now() / 1000 + 600), { mode: 0o600 })
+    if (yes) overruleTickets.set(req.key, Date.now() + 10 * 60_000)
     await answer(yes ? 'Allowed once' : 'Kept denied')
     const chat = String(q.message?.chat.id ?? q.from.id)
     if (q.message && 'text' in q.message && q.message.text) {
       const verdict = yes ? '→ ✅ Allowed once (10 min)' : '→ ❌ Kept denied'
       await api.editMessageText(chat, q.message.message_id, `${q.message.text}\n\n${verdict}`).catch(() => {})
     }
-    const c = clients.find(x => x.sessionId === req.session_id && !x.replaced)
+    const c = clients.find(x => x.sessionId === req.sessionId && !x.replaced)
     if (c) {
       const text = yes
         ? `[overrule] The owner allowed your auto-mode-denied ${req.tool} call once (valid 10 minutes). Run exactly the same call again now.`
@@ -1095,7 +1136,14 @@ async function runRelay(): Promise<void> {
   const server = createServer(sock => {
     let client: Client | null = null
     onLines(sock, msg => {
-      if (msg.t === 'use' && !client) {
+      if (msg.t === 'ovr-ask' && !client) {
+        // From the overrule hook: auto mode denied a call.
+        void overruleAsk(msg)
+        sock.end()
+      } else if (msg.t === 'ovr-use' && !client) {
+        writeLine(sock, { allow: overruleUse(msg) })
+        sock.end()
+      } else if (msg.t === 'use' && !client) {
         // From a script, not a session: switch the active session.
         const c = byPid(Number(msg.pid))
         if (c) {

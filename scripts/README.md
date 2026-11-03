@@ -157,22 +157,24 @@ Optional, needs the relay (`TELEGRAM_RELAY=1`). When auto mode's classifier
 denies a tool call in a Telegram session, you get the full call and the reason
 with "✅ Do it anyway" and "❌ No":
 
-- Yes: the relay leaves a one-time ticket for exactly that session, tool and
+- Yes: the relay keeps a one-time ticket for exactly that session, tool and
   input (the free-text `description` aside), valid 10 minutes, and tells the
-  session to run the call again. The `PreToolUse` side of the hook finds the
-  ticket, allows the call and deletes the ticket.
+  session to run the call again. On that call the `PreToolUse` side of the
+  hook asks the relay, which uses the ticket up and allows it.
 - No: the session is told not to retry. Unanswered requests expire after 30
   minutes.
 
-Claude Code doesn't wait for the `PermissionDenied` hook, so the hook only
-sends the message; the relay handles the tap. No permission rule is written.
-Sessions the relay doesn't know (headless runs, plain terminal sessions) are
-left alone. Add to `~/.claude/settings.json`:
+The hook only passes Claude Code's data to the relay over its socket. The
+relay builds the message and the ticket key from the same input, so what you
+see is what you allow, and keeps tickets in memory only, so a session can't
+write itself one. No permission rule is written. Sessions the relay doesn't
+know (headless runs, plain terminal sessions) are left alone. Add to
+`~/.claude/settings.json`:
 
 ```json
 "hooks": {
   "PermissionDenied": [
-    { "hooks": [{ "type": "command", "command": "/home/you/.local/bin/claude-tg-overrule", "timeout": 30 }] }
+    { "hooks": [{ "type": "command", "command": "/home/you/.local/bin/claude-tg-overrule", "timeout": 10 }] }
   ],
   "PreToolUse": [
     { "hooks": [{ "type": "command", "command": "/home/you/.local/bin/claude-tg-overrule", "timeout": 10 }] }
@@ -180,14 +182,12 @@ left alone. Add to `~/.claude/settings.json`:
 }
 ```
 
-Things to know: auto mode remembers a denial, so the exact same call denied
-again in the same session may not fire the hook a second time. After an
-approved retry the classifier may also let the same call through again by
-itself, having seen your approval. Tickets are plain files in
-`~/.claude/channels/telegram/overrule/tickets/`: anything running as your user
-can write one, just as it could edit your settings files. The guard against a
-session approving itself is the same classifier, which sees such a write.
-Self-check: `python3 scripts/test-claude-tg-overrule.py`.
+Things to know: Claude Code doesn't wait for the `PermissionDenied` hook, so
+the retry comes from the relay's message. Auto mode remembers a denial: the
+exact same call denied again in the same session may not fire the hook. After
+an approved retry the classifier may also let the same call through again by
+itself, having seen your approval. A relay restart drops open requests and
+tickets. Self-check of the hook side: `python3 scripts/test-claude-tg-overrule.py`.
 
 ## Stopping
 
