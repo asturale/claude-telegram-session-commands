@@ -100,6 +100,7 @@ For a machine nobody logs in to, use a long-lived token: run
 | `claude-tg-patch-plugin` | every start | Applies `server.ts` and `relay.ts` from this repository to the installed plugin |
 | `claude-tg-usage-guard` | `PreToolUse` hook, timer | Pauses sessions near your plan limits and resumes them after the reset (see below) |
 | `claude-tg-force` | `/force` | Takes the session out of the usage guard and resumes it if it was paused |
+| `claude-tg-overrule` | `PermissionDenied` + `PreToolUse` hooks | "Do it anyway" button when auto mode denies a call (see below) |
 | `tg-send` | side sessions, errors | Sends a message to you through the Bot API |
 | `claude-tg-common.sh` | the bash scripts | Settings, `PATH` and the token |
 
@@ -149,6 +150,46 @@ off for a while: `touch ~/.local/state/claude-tg/usage-guard/off`.
 
 The guard checks between tool calls, so a long turn can still go a few percent
 past the cap. That's why the default is 80% and not 95%.
+
+## Overrule an auto-mode denial
+
+Optional, needs the relay (`TELEGRAM_RELAY=1`). When auto mode's classifier
+denies a tool call in a Telegram session, you get the full call and the reason
+with "✅ Do it anyway" and "❌ No":
+
+- Yes: the relay keeps a one-time ticket for exactly that session, tool and
+  input (only Bash's free-text `description` aside), valid 10 minutes, and tells the
+  session to run the call again. On that call the `PreToolUse` side of the
+  hook asks the relay, which uses the ticket up and allows it.
+- No: the session is told not to retry. Unanswered requests expire after 30
+  minutes.
+
+The hook only passes Claude Code's data to the relay over its socket. The
+relay builds the message and the ticket key from the same input, so what you
+see is what you allow, and keeps tickets in memory only, so a session can't
+write itself one. Invisible and control characters are shown as `\u{…}`; a
+call longer than 3000 characters gets no button. The reason comes from the
+hook, so a session could word it; it's marked "as reported". No permission rule is written. Sessions the relay doesn't
+know (headless runs, plain terminal sessions) are left alone. Add to
+`~/.claude/settings.json`:
+
+```json
+"hooks": {
+  "PermissionDenied": [
+    { "hooks": [{ "type": "command", "command": "/home/you/.local/bin/claude-tg-overrule", "timeout": 10 }] }
+  ],
+  "PreToolUse": [
+    { "hooks": [{ "type": "command", "command": "/home/you/.local/bin/claude-tg-overrule", "timeout": 10 }] }
+  ]
+}
+```
+
+Things to know: Claude Code doesn't wait for the `PermissionDenied` hook, so
+the retry comes from the relay's message. Auto mode remembers a denial: the
+exact same call denied again in the same session may not fire the hook. After
+an approved retry the classifier may also let the same call through again by
+itself, having seen your approval. A relay restart drops open requests and
+tickets. Self-check of the hook side: `python3 scripts/test-claude-tg-overrule.py`.
 
 ## Stopping
 

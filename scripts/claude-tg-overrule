@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Overrule an auto-mode denial from Telegram, once.
+
+One script, two Claude Code hooks (stdin = hook JSON). It only passes Claude
+Code's own data to the relay over its socket; the relay does the rest, in
+memory, so a session can't write itself a ticket:
+
+  PermissionDenied  the relay sends the full call and the reason with
+                    "Do it anyway" / "No". On yes it keeps a one-time ticket for
+                    exactly that session, tool and input, and tells the session
+                    to retry. Claude Code doesn't wait for this hook.
+  PreToolUse        asks the relay whether this exact call has a ticket. Yes:
+                    the ticket is used up and the call is allowed. Otherwise no
+                    decision.
+
+Needs the relay (TELEGRAM_RELAY=1); without it nothing happens. Sessions the
+relay doesn't know (headless runs, plain terminal sessions) are left alone.
+"""
+import json, os, socket, sys
+from pathlib import Path
+
+STATE = Path(os.environ.get("TELEGRAM_STATE_DIR") or Path.home() / ".claude/channels/telegram")
+
+
+def relay(msg, want_reply):
+    with socket.socket(socket.AF_UNIX) as s:
+        s.settimeout(3)
+        s.connect(str(STATE / "relay.sock"))
+        s.sendall((json.dumps(msg) + "\n").encode())
+        if not want_reply:
+            return None
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        return json.loads(buf or b"{}")
+
+
+def main():
+    ev = json.load(sys.stdin)
+    call = {k: ev.get(k) for k in ("session_id", "tool_name", "tool_input")}
+    name = ev.get("hook_event_name")
+    if name == "PermissionDenied":
+        relay({"t": "ovr-ask", **call, "reason": ev.get("reason")}, False)
+    elif name == "PreToolUse" and relay({"t": "ovr-use", **call}, True).get("allow") is True:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "allow",
+            "permissionDecisionReason": "Allowed once by the owner via Telegram after an auto-mode denial"}}))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError) as e:  # no relay, no decision: never break the session
+        print(f"claude-tg-overrule: {e}", file=sys.stderr)

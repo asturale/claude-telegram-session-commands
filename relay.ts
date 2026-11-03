@@ -861,6 +861,112 @@ async function runRelay(): Promise<void> {
     return true
   }
 
+  // Overrule an auto-mode denial (scripts/claude-tg-overrule). Everything lives
+  // here, in memory: the hook only passes on what Claude Code gave it. The
+  // message and the key are made from the same tool_input, so what the owner
+  // sees is what gets allowed, and a session can't write itself a ticket.
+  const overruleAsks = new Map<string, { key: string, tool: string, sessionId: string, at: number }>()
+  const overruleTickets = new Map<string, number>() // key → expiry (ms)
+  const stable = (v: unknown): unknown =>
+    Array.isArray(v) ? v.map(stable)
+      : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, stable((v as Record<string, unknown>)[k])]))
+      : v
+  // Same session, tool and input (minus the free-text description) = same call.
+  // Bash's description is free text Claude rewrites on a retry; every other field counts.
+  const overruleFields = (tool: string, input: Record<string, unknown>) => {
+    if (tool !== 'Bash') return input
+    const { description: _, ...rest } = input
+    return rest
+  }
+  const overruleKey = (sessionId: string, tool: string, input: Record<string, unknown>) =>
+    createHash('sha256').update(JSON.stringify([sessionId, tool, stable(overruleFields(tool, input))])).digest('hex')
+  // Control, bidi and other invisible characters shown as \u{…}, so the text can't hide what runs.
+  const visible = (t: string) => t.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ch => ch === '\n' ? ch : `\\u{${ch.codePointAt(0)!.toString(16)}}`)
+  const overruleShow = (tool: string, input: Record<string, unknown>) => {
+    const fields = overruleFields(tool, input)
+    const { command, ...other } = fields
+    return visible(tool === 'Bash' && typeof command === 'string'
+      ? command + (Object.keys(other).length ? `\n\n${JSON.stringify(other)}` : '')
+      : JSON.stringify(fields, null, 1))
+  }
+  const overruleAsk = async (msg: Msg) => {
+    const sessionId = String(msg.session_id ?? '')
+    const tool = String(msg.tool_name ?? '')
+    const input = msg.tool_input
+    const c = clients.find(x => x.sessionId === sessionId && sessionId && !x.replaced)
+    const chat = ownerChats()[0]
+    if (!c || !tool || !chat || !input || typeof input !== 'object' || Array.isArray(input)) return
+    const now = Date.now()
+    for (const [id, a] of overruleAsks) if (now - a.at > 30 * 60_000) overruleAsks.delete(id)
+    const id = createHash('sha256').update(`${now}${Math.random()}`).digest('hex').slice(0, 12)
+    const inp = input as Record<string, unknown>
+    overruleAsks.set(id, { key: overruleKey(sessionId, tool, inp), tool, sessionId, at: now })
+    // The reason comes from the hook, i.e. from the session's side: shown, but marked as such.
+    const reason = visible(String(msg.reason ?? '?')).slice(0, 300)
+    const body = overruleShow(tool, inp)
+    if (body.length > 3000) {
+      // Too long to review on a phone: no button rather than a cut-off approval.
+      overruleAsks.delete(id)
+      await api.sendMessage(chat, `[${label(c)}] 🛑 Auto mode denied ${tool} (${body.length} characters, too long to review here; no overrule).\n\nReason (as reported): ${reason}`)
+        .catch(err => log(`overrule message failed: ${err}`))
+      return
+    }
+    await api.sendMessage(chat, `[${label(c)}] 🛑 Auto mode denied ${tool}:\n\n${body}\n\nReason (as reported): ${reason}\n\nAllow this exact call once?`, {
+      reply_markup: { inline_keyboard: [[
+        { text: '✅ Do it anyway', callback_data: `ovr:yes:${id}` },
+        { text: '❌ No', callback_data: `ovr:no:${id}` },
+      ]] },
+    }).catch(err => log(`overrule message failed: ${err}`))
+  }
+  // A PreToolUse check: true once for a ticketed call, then the ticket is gone.
+  const overruleUse = (msg: Msg): boolean => {
+    const input = msg.tool_input
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return false
+    const key = overruleKey(String(msg.session_id ?? ''), String(msg.tool_name ?? ''), input as Record<string, unknown>)
+    const until = overruleTickets.get(key)
+    if (until == null) return false
+    overruleTickets.delete(key)
+    return until > Date.now()
+  }
+  const handleOverrule = async (u: Update): Promise<boolean> => {
+    const q = u.callback_query
+    const m = /^ovr:(yes|no):([0-9a-f]{12})$/.exec(q?.data ?? '')
+    if (!q || !m) return false
+    const answer = (text: string) => api.answerCallbackQuery(q.id, { text }).catch(() => {})
+    if (!owner(q.from.id) || (q.message && q.message.chat.type !== 'private')) {
+      await answer('Not authorized.')
+      return true
+    }
+    const req = overruleAsks.get(m[2])
+    overruleAsks.delete(m[2]) // one answer per request
+    if (!req || Date.now() - req.at > 30 * 60_000) {
+      await answer('Expired or already answered.')
+      return true
+    }
+    const yes = m[1] === 'yes'
+    if (yes) overruleTickets.set(req.key, Date.now() + 10 * 60_000)
+    await answer(yes ? 'Allowed once' : 'Kept denied')
+    const chat = String(q.message?.chat.id ?? q.from.id)
+    if (q.message && 'text' in q.message && q.message.text) {
+      const verdict = yes ? '→ ✅ Allowed once (10 min)' : '→ ❌ Kept denied'
+      await api.editMessageText(chat, q.message.message_id, `${q.message.text}\n\n${verdict}`).catch(() => {})
+    }
+    const c = clients.find(x => x.sessionId === req.sessionId && !x.replaced)
+    if (c) {
+      const text = yes
+        ? `[overrule] The owner allowed your auto-mode-denied ${req.tool} call once (valid 10 minutes). Run exactly the same call again now.`
+        : `[overrule] The owner kept your auto-mode-denied ${req.tool} call denied. Do not retry it.`
+      writeLine(c.sock, { t: 'update', update: {
+        update_id: u.update_id,
+        message: {
+          message_id: q.message?.message_id ?? 0, date: Math.floor(Date.now() / 1000),
+          chat: q.message?.chat ?? { id: q.from.id, type: 'private' }, from: q.from, text,
+        },
+      } })
+    }
+    return true
+  }
+
   const handleCallback = async (u: Update): Promise<boolean> => {
     const q = u.callback_query
     if (!q?.data?.startsWith('relay:')) return false
@@ -962,6 +1068,7 @@ async function runRelay(): Promise<void> {
     if (await handleShortcut(u)) return
     if (await handleCommand(u)) return
     if (handleLoginCode(u)) return
+    if (await handleOverrule(u)) return
     if (await handleCallback(u)) return
 
     const q = u.callback_query
@@ -1042,7 +1149,14 @@ async function runRelay(): Promise<void> {
   const server = createServer(sock => {
     let client: Client | null = null
     onLines(sock, msg => {
-      if (msg.t === 'use' && !client) {
+      if (msg.t === 'ovr-ask' && !client) {
+        // From the overrule hook: auto mode denied a call.
+        void overruleAsk(msg)
+        sock.end()
+      } else if (msg.t === 'ovr-use' && !client) {
+        writeLine(sock, { allow: overruleUse(msg) })
+        sock.end()
+      } else if (msg.t === 'use' && !client) {
         // From a script, not a session: switch the active session.
         const c = byPid(Number(msg.pid))
         if (c) {
