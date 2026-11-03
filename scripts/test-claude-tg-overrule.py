@@ -25,7 +25,7 @@ def run(ev):
     return subprocess.run([hook], input=json.dumps(ev), capture_output=True, text=True, env=env).stdout.strip()
 
 
-call = {"session_id": "s1", "tool_name": "Bash", "tool_input": {"command": "ls; df", "description": "x"}}
+call = {"session_id": "s1", "tool_name": "Bash", "tool_input": {"command": "ls; df", "description": "x"}, "cwd": "/tmp"}
 # No relay: no decision, no crash.
 assert run({**call, "hook_event_name": "PreToolUse"}) == ""
 

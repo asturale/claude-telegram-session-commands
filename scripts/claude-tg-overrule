@@ -40,7 +40,7 @@ def relay(msg, want_reply):
 
 def main():
     ev = json.load(sys.stdin)
-    call = {k: ev.get(k) for k in ("session_id", "tool_name", "tool_input")}
+    call = {k: ev.get(k) for k in ("session_id", "tool_name", "tool_input", "cwd")}
     name = ev.get("hook_event_name")
     if name == "PermissionDenied":
         relay({"t": "ovr-ask", **call, "reason": ev.get("reason")}, False)

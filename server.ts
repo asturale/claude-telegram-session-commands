@@ -541,6 +541,24 @@ function permissionRule(tool_name: string, input_preview: string): string | null
 // file only) for anything else: a file outside a repository, a repository at
 // or above home, or a path through a dot-directory (.ssh, .aws, .config, …),
 // since those hold keys and other secrets.
+// Any .env-style file anywhere in the repo (bounded walk, skipping node_modules and
+// .git; unreadable or too big counts as "yes"): then no repo-wide read rule.
+function hasEnvFile(root: string): boolean {
+  const stack = [root]
+  let seen = 0
+  while (stack.length) {
+    const dir = stack.pop()!
+    let entries: import('fs').Dirent[]
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return true }
+    for (const e of entries) {
+      if (++seen > 20000) return true
+      if (e.isDirectory()) { if (e.name !== 'node_modules' && e.name !== '.git') stack.push(join(dir, e.name)) }
+      else if (/^\.env(\.|$)/.test(e.name) && e.name !== '.env.example') return true
+    }
+  }
+  return false
+}
+
 function readScope(file: string): string | null {
   const home = homedir().replace(/\/+$/, '')
   // HOME unset or "/": no sensible boundary (and the loop below would not end).
@@ -551,7 +569,7 @@ function readScope(file: string): string | null {
     try {
       statSync(join(d, '.git'))
       // A repo-wide read rule would also cover its .env files: then only this file.
-      if (readdirSync(d).some(f => /^\.env(\.|$)/.test(f) && f !== '.env.example')) return null
+      if (hasEnvFile(d)) return null
       return RULE_SPECIAL.test(d) || /\s/.test(d) ? null : d
     } catch {}
   }

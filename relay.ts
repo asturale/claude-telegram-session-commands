@@ -878,8 +878,26 @@ async function runRelay(): Promise<void> {
     const { description: _, ...rest } = input
     return rest
   }
-  const overruleKey = (sessionId: string, tool: string, input: Record<string, unknown>) =>
-    createHash('sha256').update(JSON.stringify([sessionId, tool, stable(overruleFields(tool, input))])).digest('hex')
+  // For Bash: the contents of every existing file the command names (scripts, configs,
+  // inputs) are part of the key, so a file changed after the tap no longer matches.
+  // Catches what RUNS_A_FILE misses (env/nohup/timeout/make/npm run …).
+  const fileHashes = (tool: string, input: Record<string, unknown>, cwd: string): string[] => {
+    if (tool !== 'Bash' || typeof input.command !== 'string') return []
+    const out: string[] = []
+    for (const raw of input.command.split(/[\s;&|()<>`=]+/)) {
+      const tok = raw.replace(/^['"]+|['"]+$/g, '')
+      if (!tok || tok.startsWith('-')) continue
+      const p = tok.startsWith('/') ? tok : tok.startsWith('~/') ? join(homedir(), tok.slice(2)) : cwd ? join(cwd, tok) : ''
+      try {
+        const st = statSync(p)
+        if (!st.isFile()) continue
+        out.push(`${p}:${st.size > 5_000_000 ? `big-${st.size}-${st.mtimeMs}` : createHash('sha256').update(readFileSync(p)).digest('hex')}`)
+      } catch {}
+    }
+    return out.sort()
+  }
+  const overruleKey = (sessionId: string, tool: string, input: Record<string, unknown>, cwd = '') =>
+    createHash('sha256').update(JSON.stringify([sessionId, tool, stable(overruleFields(tool, input)), fileHashes(tool, input, cwd)])).digest('hex')
   // Control, bidi and other invisible characters shown as \u{…}, so the text can't hide what runs.
   const visible = (t: string) => t.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ch => ch === '\n' ? ch : `\\u{${ch.codePointAt(0)!.toString(16)}}`)
   const overruleShow = (tool: string, input: Record<string, unknown>) => {
@@ -911,7 +929,7 @@ async function runRelay(): Promise<void> {
     for (const [id, a] of overruleAsks) if (now - a.at > 30 * 60_000) overruleAsks.delete(id)
     const id = createHash('sha256').update(`${now}${Math.random()}`).digest('hex').slice(0, 12)
     const inp = input as Record<string, unknown>
-    overruleAsks.set(id, { key: overruleKey(sessionId, tool, inp), tool, sessionId, at: now })
+    overruleAsks.set(id, { key: overruleKey(sessionId, tool, inp, String(msg.cwd ?? '')), tool, sessionId, at: now })
     // The reason comes from the hook, i.e. from the session's side: shown, but marked as such.
     const reason = visible(String(msg.reason ?? '?')).slice(0, 300)
     const body = overruleShow(tool, inp)
@@ -940,7 +958,7 @@ async function runRelay(): Promise<void> {
   const overruleUse = (msg: Msg): boolean => {
     const input = msg.tool_input
     if (!input || typeof input !== 'object' || Array.isArray(input)) return false
-    const key = overruleKey(String(msg.session_id ?? ''), String(msg.tool_name ?? ''), input as Record<string, unknown>)
+    const key = overruleKey(String(msg.session_id ?? ''), String(msg.tool_name ?? ''), input as Record<string, unknown>, String(msg.cwd ?? ''))
     const now = Date.now()
     for (const [k, t] of overruleTickets) if (t <= now) overruleTickets.delete(k)
     const until = overruleTickets.get(key)
