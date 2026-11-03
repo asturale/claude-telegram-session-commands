@@ -79,7 +79,7 @@ import { Api, type Bot } from 'grammy'
 import type { Update } from 'grammy/types'
 import { createHash } from 'crypto'
 import { execFile, spawn } from 'child_process'
-import { readFileSync, writeFileSync, rmSync, openSync, statSync } from 'fs'
+import { readFileSync, writeFileSync, rmSync, openSync, readSync, closeSync, statSync } from 'fs'
 import { createConnection, createServer, type Socket } from 'net'
 import { homedir } from 'os'
 import { join } from 'path'
@@ -884,14 +884,22 @@ async function runRelay(): Promise<void> {
   const fileHashes = (tool: string, input: Record<string, unknown>, cwd: string): string[] => {
     if (tool !== 'Bash' || typeof input.command !== 'string') return []
     const out: string[] = []
+    const seen = new Set<string>()
     for (const raw of input.command.split(/[\s;&|()<>`=]+/)) {
+      if (seen.size >= 20) break // bounded work per call
       const tok = raw.replace(/^['"]+|['"]+$/g, '')
       if (!tok || tok.startsWith('-')) continue
       const p = tok.startsWith('/') ? tok : tok.startsWith('~/') ? join(homedir(), tok.slice(2)) : cwd ? join(cwd, tok) : ''
+      if (!p || seen.has(p) || /^\/(proc|sys|dev)(\/|$)/.test(p)) continue
+      seen.add(p)
       try {
         const st = statSync(p)
         if (!st.isFile()) continue
-        out.push(`${p}:${st.size > 5_000_000 ? `big-${st.size}-${st.mtimeMs}` : createHash('sha256').update(readFileSync(p)).digest('hex')}`)
+        // Bounded read: at most 1 MB hashed, plus size and mtime for anything bigger.
+        const buf = Buffer.alloc(Math.min(st.size, 1_000_000))
+        const fd = openSync(p, 'r')
+        try { readSync(fd, buf, 0, buf.length, 0) } finally { closeSync(fd) }
+        out.push(`${p}:${st.size}:${st.size > buf.length ? st.mtimeMs : ''}:${createHash('sha256').update(buf).digest('hex')}`)
       } catch {}
     }
     return out.sort()
@@ -911,10 +919,20 @@ async function runRelay(): Promise<void> {
   // file-edit tools after a hook "allow" (so the button would only burn a ticket), and a
   // command that runs a file approves its name, not the contents Claude can still change.
   const NO_OVERRULE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
-  const RUNS_A_FILE = /(?:^|[\s;&|(`])(?:(?:ba|z|da|k)?sh|python[\d.]*|node|bun|deno|perl|ruby|php|source|\.)\s+(?:-\S+\s+)*(?!-)[^\s<|;&]+|(?:^|[\s;&|(`])\.{0,2}\/[^\s<|;&]+\.(?:sh|py|js|ts|mjs|pl|rb)\b/
-  const noOverruleWhy = (tool: string, input: Record<string, unknown>): string | null => {
+  // Fail closed: a command may run a file when any word is a path to one, starts at a
+  // path, or is a program that runs scripts, packages or other commands.
+  const RUNNER = /^(?:(?:ba|z|da|k|c|tc|fi)?sh|pwsh|python[\d.]*|node|bun|bunx|deno|perl|ruby|php|lua|awk|gawk|source|\.|exec|xargs|env|nohup|timeout|sudo|doas|make|npm|npx|pnpm|yarn|uv|uvx|pytest|cargo|go|tsx|ts-node|eval|watch|parallel|nice|ionice|stdbuf|setsid|chroot|busybox)$/
+  const mayRunFile = (command: string, cwd: string) => {
+    const words = command.split(/[\s;&|()<>`]+/).map(w => w.replace(/^['"]+|['"]+$/g, '')).filter(Boolean)
+    if (/<|\|\s*(?:\S*\/)?(?:(?:ba|z|da)?sh|python[\d.]*|node|perl|ruby|bun)\b/.test(command)) return true
+    if (words.some(w => RUNNER.test(w.replace(/^.*\//, '')) || w.startsWith('$'))) return true
+    const first = words[0] ?? ''
+    if (first.includes('/') || first.startsWith('~')) return true
+    return fileHashes('Bash', { command }, cwd).length > 0 && words.some(w => /\.(?:sh|py|js|mjs|cjs|ts|pl|rb|php|lua)$/.test(w))
+  }
+  const noOverruleWhy = (tool: string, input: Record<string, unknown>, cwd: string): string | null => {
     if (NO_OVERRULE_TOOLS.has(tool)) return 'file edits can\'t be overruled from here; approve in the terminal'
-    if (tool === 'Bash' && typeof input.command === 'string' && RUNS_A_FILE.test(input.command))
+    if (tool === 'Bash' && typeof input.command === 'string' && mayRunFile(input.command, cwd))
       return 'it runs a file whose contents you can\'t see here; approve in the terminal'
     return null
   }
@@ -933,7 +951,7 @@ async function runRelay(): Promise<void> {
     // The reason comes from the hook, i.e. from the session's side: shown, but marked as such.
     const reason = visible(String(msg.reason ?? '?')).slice(0, 300)
     const body = overruleShow(tool, inp)
-    const why = noOverruleWhy(tool, inp)
+    const why = noOverruleWhy(tool, inp, String(msg.cwd ?? ''))
     if (why) {
       overruleAsks.delete(id)
       await api.sendMessage(chat, `[${label(c)}] 🛑 Auto mode denied ${tool}:\n\n${body.slice(0, 1500)}\n\nReason (as reported): ${reason}\n\nNo overrule: ${why}.`)
@@ -958,6 +976,7 @@ async function runRelay(): Promise<void> {
   const overruleUse = (msg: Msg): boolean => {
     const input = msg.tool_input
     if (!input || typeof input !== 'object' || Array.isArray(input)) return false
+    if (overruleTickets.size === 0) return false // the common case: no work on every tool call
     const key = overruleKey(String(msg.session_id ?? ''), String(msg.tool_name ?? ''), input as Record<string, unknown>, String(msg.cwd ?? ''))
     const now = Date.now()
     for (const [k, t] of overruleTickets) if (t <= now) overruleTickets.delete(k)

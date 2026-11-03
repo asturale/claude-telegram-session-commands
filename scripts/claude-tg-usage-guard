@@ -93,7 +93,11 @@ def usage(fresh=False):
     except urllib.error.HTTPError as e:
         if e.code != 429:
             return st.get("data")
-        st["retry_at"] = now + int(e.headers.get("retry-after") or 600)
+        try:
+            wait = int(e.headers.get("retry-after") or 600)
+        except ValueError:
+            wait = 600
+        st["retry_at"] = now + min(max(wait, 60), 3600)  # matches the 1-hour cap on reading it back
     except Exception:
         return st.get("data")
     USAGE_CACHE.parent.mkdir(parents=True, exist_ok=True)

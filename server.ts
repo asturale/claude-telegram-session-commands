@@ -458,17 +458,30 @@ const SAFE_PREFIXES: Record<string, string[]> = {
 // nothing beyond what other rules already gate. Not Grep/Glob/LS/NotebookRead:
 // allowed whole they read or list every file on disk.
 const WHOLE_TOOLS = new Set(['WebSearch', 'TodoWrite', 'Agent', 'Task'])
-// MCP tools that run code, change things in the world or delete: never "always".
-const RISKY_MCP = /unsafe|run_code|evaluate|exec|eval|call_service|bulk|restart|delete|remove|send|reply|publish|deploy|write|create|update|set_|_set|push|merge|transfer|pay/i
+// MCP tools get "always" only when their name says they just read: an allowlist of
+// read verbs (a denylist of risky verbs kept missing tools like file_upload or do_action).
+const READ_ONLY_MCP = /^(?:[a-z0-9]+_)?(?:get|list|search|read|find|query|describe|probe|render|lookup|view|whoami|check|status|filter_syntax)(?:_|$)/i
 // Rule syntax characters: parentheses end the rule, * ? [ ] { } are globs.
 const RULE_SPECIAL = /[()*?[\]{}\\'"]/
+
+const RUNNER = /^(?:(?:ba|z|da|k|c|tc|fi)?sh|pwsh|python[\d.]*|node|bun|bunx|deno|perl|ruby|php|lua|awk|gawk|source|\.|exec|xargs|env|nohup|timeout|sudo|doas|make|npm|npx|pnpm|yarn|uv|uvx|pytest|cargo|go|tsx|ts-node|eval|watch|parallel|nice|ionice|stdbuf|setsid|chroot|busybox|find)$/
+function mayRunFile(tokens: string[]): boolean {
+  if (tokens.some(t => RUNNER.test(t.replace(/^.*\//, '')))) return true
+  const first = tokens[0] ?? ''
+  if (first.includes('/') || first.startsWith('~')) return true
+  // Any named file with the exec bit or a script extension.
+  return tokens.slice(1).some(t => {
+    if (/\.(?:sh|py|js|mjs|cjs|ts|pl|rb|php|lua)$/.test(t)) return true
+    try { return t.startsWith('/') && (statSync(t).mode & 0o111) !== 0 && statSync(t).isFile() } catch { return false }
+  })
+}
 
 // Derive the permission rule an "Always" tap adds, from the tool name and
 // Claude Code's input preview (JSON-like, `{ "key": value, … }`, possibly
 // shortened). Returns null when no safe rule can be derived; then the request
 // only gets Allow/Deny.
 function permissionRule(tool_name: string, input_preview: string): string | null {
-  if (tool_name.startsWith('mcp__')) return RISKY_MCP.test(tool_name.split('__').slice(2).join('__')) ? null : tool_name
+  if (tool_name.startsWith('mcp__')) return READ_ONLY_MCP.test(tool_name.split('__').slice(2).join('__')) ? tool_name : null
   if (input_preview.includes('⋯') || input_preview.includes('…')) return null
   let input: Record<string, unknown> = {}
   const trimmed = input_preview.trim()
@@ -495,6 +508,9 @@ function permissionRule(tool_name: string, input_preview: string): string | null
       const subs = Object.hasOwn(SAFE_PREFIXES, first) ? SAFE_PREFIXES[first]! : null
       if (subs && subs.length === 0) return `Bash(${first}:*)`
       if (subs && tokens[1] && subs.includes(tokens[1])) return `Bash(${first} ${tokens[1]}:*)`
+      // An exact rule for a command that runs a file would allow whatever that file
+      // later contains: no rule (fail closed, same idea as the relay's overrule check).
+      if (mayRunFile(tokens)) return null
       return `Bash(${command})`
     }
     case 'WebFetch': {
@@ -520,6 +536,9 @@ function permissionRule(tool_name: string, input_preview: string): string | null
       // bin directory: a rule there lets Claude widen its own permissions, run code
       // later or read secrets.
       if (parts.some(s => s === '..' || s.startsWith('.') || s === 'bin')) return null
+      // Never a lasting rule for code that runs by itself: executable files and the
+      // targets of Claude Code hooks (often symlinked into a repo's scripts/ folder).
+      if (tool_name !== 'Read' && (isExecutable(p) || hookTargets().has(realOrSelf(p)))) return null
       // Reading: the whole project the file is in (its git repository, else its
       // directory), so reading the next file there doesn't ask again. Writing:
       // just this file, since a directory glob would also cover nested .git/.claude
@@ -541,6 +560,27 @@ function permissionRule(tool_name: string, input_preview: string): string | null
 // file only) for anything else: a file outside a repository, a repository at
 // or above home, or a path through a dot-directory (.ssh, .aws, .config, …),
 // since those hold keys and other secrets.
+function realOrSelf(p: string): string {
+  try { return realpathSync(p) } catch { return p }
+}
+function isExecutable(p: string): boolean {
+  try { const st = statSync(p); return st.isFile() && (st.mode & 0o111) !== 0 } catch { return false }
+}
+// Real paths of every command in the hooks of the user and project settings.
+function hookTargets(): Set<string> {
+  const out = new Set<string>()
+  const files = [join(homedir(), '.claude', 'settings.json'), join(homedir(), '.claude', 'settings.local.json')]
+  if (PROJECT_DIR) files.push(join(PROJECT_DIR, '.claude', 'settings.json'), join(PROJECT_DIR, '.claude', 'settings.local.json'))
+  for (const f of files) {
+    let hooks: Record<string, unknown> = {}
+    try { hooks = JSON.parse(readFileSync(f, 'utf8')).hooks ?? {} } catch { continue }
+    for (const groups of Object.values(hooks)) for (const g of (Array.isArray(groups) ? groups : []))
+      for (const h of (Array.isArray(g?.hooks) ? g.hooks : [])) if (typeof h?.command === 'string')
+        for (const w of h.command.split(/\s+/)) if (w.includes('/')) out.add(realOrSelf(w.replace(/^~(?=\/)/, homedir())))
+  }
+  return out
+}
+
 // Any .env-style file anywhere in the repo (bounded walk, skipping node_modules and
 // .git; unreadable or too big counts as "yes"): then no repo-wide read rule.
 function hasEnvFile(root: string): boolean {
@@ -570,6 +610,7 @@ function readScope(file: string): string | null {
       statSync(join(d, '.git'))
       // A repo-wide read rule would also cover its .env files: then only this file.
       if (hasEnvFile(d)) return null
+      try { if (/:\/\/[^\s/@]+@/.test(readFileSync(join(d, '.git', 'config'), 'utf8'))) return null } catch {}
       return RULE_SPECIAL.test(d) || /\s/.test(d) ? null : d
     } catch {}
   }
