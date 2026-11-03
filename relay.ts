@@ -861,6 +861,58 @@ async function runRelay(): Promise<void> {
     return true
   }
 
+  // "Do it anyway" / "No" under an auto-mode denial (scripts/claude-tg-overrule).
+  // The hook left overrule/<id>.json ({key, tool, session_id, at}). Yes: a
+  // one-time ticket tickets/<key> that the hook's PreToolUse side consumes,
+  // and the session is told to retry. Only the owner's tap counts.
+  const OVERRULE_DIR = join(STATE_DIR, 'overrule')
+  const handleOverrule = async (u: Update): Promise<boolean> => {
+    const q = u.callback_query
+    const m = /^ovr:(yes|no):([0-9a-f]{12})$/.exec(q?.data ?? '')
+    if (!q || !m) return false
+    const answer = (text: string) => api.answerCallbackQuery(q.id, { text }).catch(() => {})
+    if (!owner(q.from.id) || (q.message && q.message.chat.type !== 'private')) {
+      await answer('Not authorized.')
+      return true
+    }
+    const reqFile = join(OVERRULE_DIR, `${m[2]}.json`)
+    let req: { key?: unknown, tool?: unknown, session_id?: unknown, at?: unknown }
+    try {
+      req = JSON.parse(readFileSync(reqFile, 'utf8'))
+      rmSync(reqFile) // one answer per request
+    } catch {
+      await answer('Expired or already answered.')
+      return true
+    }
+    const fresh = typeof req.at === 'number' && Date.now() / 1000 - req.at < 30 * 60
+    if (!fresh || typeof req.key !== 'string' || !/^[0-9a-f]{64}$/.test(req.key)) {
+      await answer('Expired.')
+      return true
+    }
+    const yes = m[1] === 'yes'
+    if (yes) writeFileSync(join(OVERRULE_DIR, 'tickets', req.key), String(Date.now() / 1000 + 600), { mode: 0o600 })
+    await answer(yes ? 'Allowed once' : 'Kept denied')
+    const chat = String(q.message?.chat.id ?? q.from.id)
+    if (q.message && 'text' in q.message && q.message.text) {
+      const verdict = yes ? '→ ✅ Allowed once (10 min)' : '→ ❌ Kept denied'
+      await api.editMessageText(chat, q.message.message_id, `${q.message.text}\n\n${verdict}`).catch(() => {})
+    }
+    const c = clients.find(x => x.sessionId === req.session_id && !x.replaced)
+    if (c) {
+      const text = yes
+        ? `[overrule] The owner allowed your auto-mode-denied ${req.tool} call once (valid 10 minutes). Run exactly the same call again now.`
+        : `[overrule] The owner kept your auto-mode-denied ${req.tool} call denied. Do not retry it.`
+      writeLine(c.sock, { t: 'update', update: {
+        update_id: u.update_id,
+        message: {
+          message_id: q.message?.message_id ?? 0, date: Math.floor(Date.now() / 1000),
+          chat: q.message?.chat ?? { id: q.from.id, type: 'private' }, from: q.from, text,
+        },
+      } })
+    }
+    return true
+  }
+
   const handleCallback = async (u: Update): Promise<boolean> => {
     const q = u.callback_query
     if (!q?.data?.startsWith('relay:')) return false
@@ -962,6 +1014,7 @@ async function runRelay(): Promise<void> {
     if (await handleShortcut(u)) return
     if (await handleCommand(u)) return
     if (handleLoginCode(u)) return
+    if (await handleOverrule(u)) return
     if (await handleCallback(u)) return
 
     const q = u.callback_query

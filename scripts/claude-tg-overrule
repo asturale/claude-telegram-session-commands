@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Overrule an auto-mode denial from Telegram, once.
+
+One script, two Claude Code hooks (stdin = hook JSON):
+
+  PermissionDenied  auto mode refused a tool call. Sends the full call and the
+                    reason to Telegram with "Do it anyway" / "No" and leaves
+                    overrule/<id>.json. Returns at once: Claude Code doesn't wait
+                    for this hook. The relay handles the tap: on yes it writes a
+                    one-time ticket and tells the session to retry.
+  PreToolUse        a ticket for exactly this session + tool + input? Use it up
+                    and allow the call. Otherwise stay silent (no decision).
+
+Only for sessions the Telegram relay knows (TELEGRAM_RELAY=1); headless runs
+(claude -p, CI) and plain terminal sessions are left alone. A request can be
+answered for 30 minutes, a ticket is valid for 10. Nothing is written to
+settings files.
+"""
+import hashlib, json, os, secrets, sys, time, urllib.parse, urllib.request
+from pathlib import Path
+
+STATE = Path(os.environ.get("TELEGRAM_STATE_DIR") or Path.home() / ".claude/channels/telegram")
+DIR = STATE / "overrule"
+TICKETS = DIR / "tickets"
+
+
+def key(ev):
+    """Same session, tool and input (minus the free-text description) = same call."""
+    inp = {k: v for k, v in (ev.get("tool_input") or {}).items() if k != "description"}
+    blob = json.dumps([ev.get("session_id"), ev.get("tool_name"), inp], sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def relay_label(session_id):
+    """The session's label in the relay ("2·opus"), or None if the relay doesn't know it."""
+    try:
+        relay = json.loads((STATE / "relay-state.json").read_text())
+    except (OSError, ValueError):
+        return None
+    for s in relay.get("sessions", []):
+        if session_id and s.get("sessionId") == session_id:
+            return s.get("label") or ""
+    return None
+
+
+def describe(ev):
+    inp = ev.get("tool_input") or {}
+    if ev.get("tool_name") == "Bash" and isinstance(inp.get("command"), str):
+        body = inp["command"]
+    else:
+        body = json.dumps(inp, ensure_ascii=False, indent=1)
+    if len(body) > 3000:
+        body = body[:3000] + "\n[… cut off; the full call is what gets allowed]"
+    return body
+
+
+def send(text, ident):
+    env = (STATE / ".env").read_text().splitlines()
+    token = next(l.split("=", 1)[1].strip() for l in env if l.startswith("TELEGRAM_BOT_TOKEN="))
+    chat = json.loads((STATE / "access.json").read_text())["allowFrom"][0]
+    kb = {"inline_keyboard": [[{"text": "✅ Do it anyway", "callback_data": f"ovr:yes:{ident}"},
+                               {"text": "❌ No", "callback_data": f"ovr:no:{ident}"}]]}
+    data = urllib.parse.urlencode({"chat_id": chat, "text": text[:4000], "reply_markup": json.dumps(kb)}).encode()
+    urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data, timeout=20).read()
+
+
+def on_denied(ev):
+    label = relay_label(ev.get("session_id"))
+    if label is None:
+        return
+    TICKETS.mkdir(mode=0o700, parents=True, exist_ok=True)
+    now = time.time()
+    for old in DIR.glob("*.json"):  # unanswered requests the relay will refuse anyway
+        if now - old.stat().st_mtime > 3600:
+            old.unlink(missing_ok=True)
+    ident = secrets.token_hex(6)
+    (DIR / f"{ident}.json").write_text(json.dumps(
+        {"key": key(ev), "tool": ev.get("tool_name"), "session_id": ev.get("session_id"), "at": now}))
+    prefix = f"[{label}] " if label else ""
+    send(f"{prefix}🛑 Auto mode denied {ev.get('tool_name', '?')}:\n\n{describe(ev)}\n\n"
+         f"Reason: {ev.get('reason') or '?'}\n\nAllow this exact call once?", ident)
+
+
+def on_pre_tool(ev):
+    ticket = TICKETS / key(ev)
+    claimed = ticket.with_suffix(f".used-{os.getpid()}")
+    try:
+        ticket.rename(claimed)  # atomic: a ticket is used at most once
+    except OSError:
+        return
+    try:
+        valid = float(claimed.read_text()) > time.time()
+    except (OSError, ValueError):
+        valid = False
+    claimed.unlink(missing_ok=True)
+    if valid:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "allow",
+            "permissionDecisionReason": "Allowed once by the owner via Telegram after an auto-mode denial"}}))
+
+
+def main():
+    try:
+        ev = json.load(sys.stdin)
+    except ValueError:
+        return
+    name = ev.get("hook_event_name")
+    if name == "PermissionDenied":
+        on_denied(ev)
+    elif name == "PreToolUse" and TICKETS.is_dir():
+        on_pre_tool(ev)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:  # never break the session over a notification
+        print(f"claude-tg-overrule: {e}", file=sys.stderr)

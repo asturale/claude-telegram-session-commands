@@ -100,6 +100,7 @@ For a machine nobody logs in to, use a long-lived token: run
 | `claude-tg-patch-plugin` | every start | Applies `server.ts` and `relay.ts` from this repository to the installed plugin |
 | `claude-tg-usage-guard` | `PreToolUse` hook, timer | Pauses sessions near your plan limits and resumes them after the reset (see below) |
 | `claude-tg-force` | `/force` | Takes the session out of the usage guard and resumes it if it was paused |
+| `claude-tg-overrule` | `PermissionDenied` + `PreToolUse` hooks | "Do it anyway" button when auto mode denies a call (see below) |
 | `tg-send` | side sessions, errors | Sends a message to you through the Bot API |
 | `claude-tg-common.sh` | the bash scripts | Settings, `PATH` and the token |
 
@@ -149,6 +150,40 @@ off for a while: `touch ~/.local/state/claude-tg/usage-guard/off`.
 
 The guard checks between tool calls, so a long turn can still go a few percent
 past the cap. That's why the default is 80% and not 95%.
+
+## Overrule an auto-mode denial
+
+Optional, needs the relay (`TELEGRAM_RELAY=1`). When auto mode's classifier
+denies a tool call in a Telegram session, you get the full call and the reason
+with "✅ Do it anyway" and "❌ No":
+
+- Yes: the relay leaves a one-time ticket for exactly that session, tool and
+  input (the free-text `description` aside), valid 10 minutes, and tells the
+  session to run the call again. The `PreToolUse` side of the hook finds the
+  ticket, allows the call and deletes the ticket.
+- No: the session is told not to retry. Unanswered requests expire after 30
+  minutes.
+
+Claude Code doesn't wait for the `PermissionDenied` hook, so the hook only
+sends the message; the relay handles the tap. No permission rule is written.
+Sessions the relay doesn't know (headless runs, plain terminal sessions) are
+left alone. Add to `~/.claude/settings.json`:
+
+```json
+"hooks": {
+  "PermissionDenied": [
+    { "hooks": [{ "type": "command", "command": "/home/you/.local/bin/claude-tg-overrule", "timeout": 30 }] }
+  ],
+  "PreToolUse": [
+    { "hooks": [{ "type": "command", "command": "/home/you/.local/bin/claude-tg-overrule", "timeout": 10 }] }
+  ]
+}
+```
+
+Things to know: auto mode remembers a denial, so the exact same call denied
+again in the same session may not fire the hook a second time. After an
+approved retry the classifier may also let the same call through again by
+itself, having seen your approval. Self-check: `python3 scripts/test-claude-tg-overrule.py`.
 
 ## Stopping
 
