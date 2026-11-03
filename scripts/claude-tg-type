@@ -46,10 +46,14 @@ def drain(seconds):
     return buf
 
 
-def shown(screen):
-    """The mode the footer shows last in this screen output, or None."""
+def shown(screen, strict=False):
+    """The mode the footer shows last in this screen output, or None. strict: only
+    a footer drawn whole under the input box counts (the first screen; after a
+    Shift+Tab only the label is redrawn), not the same words in the conversation."""
     plain = re.sub(rb"\x1b\[[0-9;?>]*[A-Za-z]|\x1b\][^\x07]*\x07", b" ", screen).decode("utf8", "replace")
-    hits = [(plain.rfind(t), m) for m, t in FOOTER.items() if m != "default" and t in plain]
+    head = r"─\r\s+\S{1,3} " if strict else ""  # right under the input box's bottom rule, after the icon
+    hits = [(x.end(), m) for m, t in FOOTER.items() if m != "default"
+            for x in re.finditer(head + re.escape(t), plain)]
     if not hits or plain.rfind("to cancel") > max(hits)[0]:
         return None  # no footer, or a dialog (permission prompt …) is open: Shift+Tab would answer it
     return max(hits)[1]
@@ -67,13 +71,16 @@ def close():
 
 screen = drain(6)            # let the UI build up
 if mode:
-    want, old = "manual" if mode == "default" else mode, shown(screen)
+    want, old = "manual" if mode == "default" else mode, shown(screen, strict=True)
     now = old
     for _ in range(len(FOOTER)):  # one full cycle at most
         if now == want or now is None:
             break
         os.write(fd, b"\x1b[Z")  # Shift+Tab
-        now = shown(drain(1.5)) or now
+        s = shown(drain(1.5))
+        if s is None:  # a dialog opened: another Shift+Tab would answer it
+            break
+        now = s
     close()
     print(old, now)
     sys.exit(0 if now == want else 1)
