@@ -183,7 +183,11 @@ left alone. Add to `~/.claude/settings.json`:
 Things to know: auto mode remembers a denial, so the exact same call denied
 again in the same session may not fire the hook a second time. After an
 approved retry the classifier may also let the same call through again by
-itself, having seen your approval. Self-check: `python3 scripts/test-claude-tg-overrule.py`.
+itself, having seen your approval. Tickets are plain files in
+`~/.claude/channels/telegram/overrule/tickets/`: anything running as your user
+can write one, just as it could edit your settings files. The guard against a
+session approving itself is the same classifier, which sees such a write.
+Self-check: `python3 scripts/test-claude-tg-overrule.py`.
 
 ## Stopping
 
