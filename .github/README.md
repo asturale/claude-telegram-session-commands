@@ -84,13 +84,13 @@ The prompt shows the rule before you tap. Rules are derived fail-closed:
 
 | Tool | Rule |
 |------|------|
-| `Bash` | a prefix (`Bash(ls:*)`, `Bash(git status:*)`) only for a short list of read-only commands without exec- or write-capable flags (`SAFE_PREFIXES` in `server.ts`); otherwise the exact command. No button for compound commands, variables, substitutions, redirects or glob characters. |
-| MCP tools | the tool name |
+| `Bash` | a prefix (`Bash(ls:*)`, `Bash(git status:*)`) only for a short list of read-only commands without exec- or write-capable flags that don't print file contents (`SAFE_PREFIXES` in `server.ts`); otherwise the exact command, so `cat`, `head`, `tail`, `grep` and `docker logs`/`inspect` only ever get an exact rule. No rule at all for commands that may run a file (a path as the program, an interpreter, `make`/`npm`/`npx`/`env`/`sudo`/`xargs` …, a named script or executable): the rule would cover whatever that file contains later. No button for compound commands, variables, substitutions, redirects or glob characters. |
+| MCP tools | the tool name, only for tools whose name says they just read (`get`, `list`, `search`, `read`, `find`, `query` … in `READ_ONLY_MCP`); every other MCP tool gets no button |
 | `WebFetch` | `WebFetch(domain:<host>)` |
-| `Edit`/`Write`/`NotebookEdit`, `Read` | the exact file (`Edit(//<path>)`); a directory glob would also cover nested `.git`/`.claude`. No button for paths with `..`, `.claude` or `.git`, or glob characters. |
-| `WebSearch`, `Glob`, `Grep`, `Agent`, … | the tool name |
+| `Edit`/`Write`/`NotebookEdit`, `Read` | the exact file (`Edit(//<path>)`); `Read` gets the whole git repository unless it holds `.env` files. No button for paths with `..`, any dot file or directory (`.claude`, `.git`, `.ssh`, `.bashrc`, `.local/bin`, `.github` …), a `bin` directory, an executable file or the target of a Claude Code hook (resolved through symlinks), or glob characters. A repo-wide `Read` is also skipped when `.git/config` holds credentials in a remote URL. |
+| `WebSearch`, `TodoWrite`, `Agent`, `Task` | the tool name (not `Grep`, `Glob`, `LS` or `NotebookRead`: allowed whole they read or list any file) |
 
-No button for other tools, or when the input preview was shortened. `TELEGRAM_PERMISSION_ALWAYS=0`
+The message says in words what the rule allows ("reading every file under …", "every call to this tool"). No button for other tools, or when the input preview was shortened. `TELEGRAM_PERMISSION_ALWAYS=0`
 turns the button off.
 
 ## How it works
