@@ -158,7 +158,7 @@ denies a tool call in a Telegram session, you get the full call and the reason
 with "✅ Do it anyway" and "❌ No":
 
 - Yes: the relay keeps a one-time ticket for exactly that session, tool and
-  input (the free-text `description` aside), valid 10 minutes, and tells the
+  input (only Bash's free-text `description` aside), valid 10 minutes, and tells the
   session to run the call again. On that call the `PreToolUse` side of the
   hook asks the relay, which uses the ticket up and allows it.
 - No: the session is told not to retry. Unanswered requests expire after 30
@@ -167,7 +167,9 @@ with "✅ Do it anyway" and "❌ No":
 The hook only passes Claude Code's data to the relay over its socket. The
 relay builds the message and the ticket key from the same input, so what you
 see is what you allow, and keeps tickets in memory only, so a session can't
-write itself one. No permission rule is written. Sessions the relay doesn't
+write itself one. Invisible and control characters are shown as `\u{…}`; a
+call longer than 3000 characters gets no button. The reason comes from the
+hook, so a session could word it; it's marked "as reported". No permission rule is written. Sessions the relay doesn't
 know (headless runs, plain terminal sessions) are left alone. Add to
 `~/.claude/settings.json`:
 

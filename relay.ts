@@ -872,18 +872,22 @@ async function runRelay(): Promise<void> {
       : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, stable((v as Record<string, unknown>)[k])]))
       : v
   // Same session, tool and input (minus the free-text description) = same call.
-  const overruleKey = (sessionId: string, tool: string, input: Record<string, unknown>) => {
+  // Bash's description is free text Claude rewrites on a retry; every other field counts.
+  const overruleFields = (tool: string, input: Record<string, unknown>) => {
+    if (tool !== 'Bash') return input
     const { description: _, ...rest } = input
-    return createHash('sha256').update(JSON.stringify([sessionId, tool, stable(rest)])).digest('hex')
+    return rest
   }
+  const overruleKey = (sessionId: string, tool: string, input: Record<string, unknown>) =>
+    createHash('sha256').update(JSON.stringify([sessionId, tool, stable(overruleFields(tool, input))])).digest('hex')
+  // Control, bidi and other invisible characters shown as \u{…}, so the text can't hide what runs.
+  const visible = (t: string) => t.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ch => ch === '\n' ? ch : `\\u{${ch.codePointAt(0)!.toString(16)}}`)
   const overruleShow = (tool: string, input: Record<string, unknown>) => {
-    const { description: _, ...rest } = input
-    const { command, ...other } = rest
-    let body = tool === 'Bash' && typeof command === 'string'
+    const fields = overruleFields(tool, input)
+    const { command, ...other } = fields
+    return visible(tool === 'Bash' && typeof command === 'string'
       ? command + (Object.keys(other).length ? `\n\n${JSON.stringify(other)}` : '')
-      : JSON.stringify(rest, null, 1)
-    if (body.length > 3000) body = body.slice(0, 3000) + '\n[… cut off; the full call is what gets allowed]'
-    return body
+      : JSON.stringify(fields, null, 1))
   }
   const overruleAsk = async (msg: Msg) => {
     const sessionId = String(msg.session_id ?? '')
@@ -897,8 +901,17 @@ async function runRelay(): Promise<void> {
     const id = createHash('sha256').update(`${now}${Math.random()}`).digest('hex').slice(0, 12)
     const inp = input as Record<string, unknown>
     overruleAsks.set(id, { key: overruleKey(sessionId, tool, inp), tool, sessionId, at: now })
-    const reason = String(msg.reason ?? '?').slice(0, 500)
-    await api.sendMessage(chat, `[${label(c)}] 🛑 Auto mode denied ${tool}:\n\n${overruleShow(tool, inp)}\n\nReason: ${reason}\n\nAllow this exact call once?`, {
+    // The reason comes from the hook, i.e. from the session's side: shown, but marked as such.
+    const reason = visible(String(msg.reason ?? '?')).slice(0, 300)
+    const body = overruleShow(tool, inp)
+    if (body.length > 3000) {
+      // Too long to review on a phone: no button rather than a cut-off approval.
+      overruleAsks.delete(id)
+      await api.sendMessage(chat, `[${label(c)}] 🛑 Auto mode denied ${tool} (${body.length} characters, too long to review here; no overrule).\n\nReason (as reported): ${reason}`)
+        .catch(err => log(`overrule message failed: ${err}`))
+      return
+    }
+    await api.sendMessage(chat, `[${label(c)}] 🛑 Auto mode denied ${tool}:\n\n${body}\n\nReason (as reported): ${reason}\n\nAllow this exact call once?`, {
       reply_markup: { inline_keyboard: [[
         { text: '✅ Do it anyway', callback_data: `ovr:yes:${id}` },
         { text: '❌ No', callback_data: `ovr:no:${id}` },
