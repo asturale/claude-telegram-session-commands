@@ -921,14 +921,21 @@ async function runRelay(): Promise<void> {
   const NO_OVERRULE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
   // Fail closed: a command may run a file when any word is a path to one, starts at a
   // path, or is a program that runs scripts, packages or other commands.
-  const RUNNER = /^(?:(?:ba|z|da|k|c|tc|fi)?sh|pwsh|python[\d.]*|node|bun|bunx|deno|perl|ruby|php|lua|awk|gawk|source|\.|exec|xargs|env|nohup|timeout|sudo|doas|make|npm|npx|pnpm|yarn|uv|uvx|pytest|cargo|go|tsx|ts-node|eval|watch|parallel|nice|ionice|stdbuf|setsid|chroot|busybox)$/
+  const RUNNER = /^(?:(?:ba|z|da|k|c|tc|fi)?sh|pwsh|python[\d.]*|node|bun|bunx|deno|perl|ruby|php|lua|awk|gawk|source|\.|exec|xargs|env|nohup|timeout|sudo|doas|make|npm|npx|pnpm|yarn|uv|uvx|pytest|cargo|go|tsx|ts-node|eval|watch|parallel|nice|ionice|stdbuf|setsid|chroot|busybox|command|builtin|time|strace|ltrace|flock|script|taskset|chrt|unbuffer|systemd-run|find|bwrap|firejail|flatpak|snap)$/
   const mayRunFile = (command: string, cwd: string) => {
     const words = command.split(/[\s;&|()<>`]+/).map(w => w.replace(/^['"]+|['"]+$/g, '')).filter(Boolean)
     if (/<|\|\s*(?:\S*\/)?(?:(?:ba|z|da)?sh|python[\d.]*|node|perl|ruby|bun)\b/.test(command)) return true
     if (words.some(w => RUNNER.test(w.replace(/^.*\//, '')) || w.startsWith('$'))) return true
     const first = words[0] ?? ''
     if (first.includes('/') || first.startsWith('~')) return true
-    return fileHashes('Bash', { command }, cwd).length > 0 && words.some(w => /\.(?:sh|py|js|mjs|cjs|ts|pl|rb|php|lua)$/.test(w))
+    if (words.some(w => /\.(?:sh|py|js|mjs|cjs|ts|pl|rb|php|lua)$/.test(w))) return true
+    // Any word with a slash that is an executable file, or can't be checked: fail closed.
+    return words.slice(1).some(w => {
+      if (!w.includes('/') || /^[a-z][a-z0-9+.-]*:\/\//i.test(w)) return false // URLs are fine
+      const p = w.startsWith('/') ? w : w.startsWith('~/') ? join(homedir(), w.slice(2)) : cwd ? join(cwd, w) : ''
+      if (!p) return true
+      try { const st = statSync(p); return st.isFile() && (st.mode & 0o111) !== 0 } catch { return false }
+    })
   }
   const noOverruleWhy = (tool: string, input: Record<string, unknown>, cwd: string): string | null => {
     if (NO_OVERRULE_TOOLS.has(tool)) return 'file edits can\'t be overruled from here; approve in the terminal'

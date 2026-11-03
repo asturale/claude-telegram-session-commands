@@ -460,19 +460,25 @@ const SAFE_PREFIXES: Record<string, string[]> = {
 const WHOLE_TOOLS = new Set(['WebSearch', 'TodoWrite', 'Agent', 'Task'])
 // MCP tools get "always" only when their name says they just read: an allowlist of
 // read verbs (a denylist of risky verbs kept missing tools like file_upload or do_action).
-const READ_ONLY_MCP = /^(?:[a-z0-9]+_)?(?:get|list|search|read|find|query|describe|probe|render|lookup|view|whoami|check|status|filter_syntax)(?:_|$)/i
+const READ_ONLY_MCP = /^(?:[a-z0-9]+_)?(?:get|list|search|read|find|describe|probe|lookup|view|whoami|check|status|filter_syntax)(?:_|$)/i
+// Second check, anywhere in the name: a read verb plus one of these is not read-only.
+const STATE_CHANGING_MCP = /unsafe|run|code|exec|eval|query|render|sql|call|bulk|restart|reload|delete|remove|send|reply|publish|deploy|write|create|update|set|push|merge|upload|download|action|manage|edit|replace|archive|rsvp|transfer|pay|kill|stop|start/i
 // Rule syntax characters: parentheses end the rule, * ? [ ] { } are globs.
 const RULE_SPECIAL = /[()*?[\]{}\\'"]/
 
-const RUNNER = /^(?:(?:ba|z|da|k|c|tc|fi)?sh|pwsh|python[\d.]*|node|bun|bunx|deno|perl|ruby|php|lua|awk|gawk|source|\.|exec|xargs|env|nohup|timeout|sudo|doas|make|npm|npx|pnpm|yarn|uv|uvx|pytest|cargo|go|tsx|ts-node|eval|watch|parallel|nice|ionice|stdbuf|setsid|chroot|busybox|find)$/
+const RUNNER = /^(?:(?:ba|z|da|k|c|tc|fi)?sh|pwsh|python[\d.]*|node|bun|bunx|deno|perl|ruby|php|lua|awk|gawk|source|\.|exec|xargs|env|nohup|timeout|sudo|doas|make|npm|npx|pnpm|yarn|uv|uvx|pytest|cargo|go|tsx|ts-node|eval|watch|parallel|nice|ionice|stdbuf|setsid|chroot|busybox|command|builtin|time|strace|ltrace|flock|script|taskset|chrt|unbuffer|systemd-run|find|bwrap|firejail|flatpak|snap)$/
 function mayRunFile(tokens: string[]): boolean {
   if (tokens.some(t => RUNNER.test(t.replace(/^.*\//, '')))) return true
   const first = tokens[0] ?? ''
   if (first.includes('/') || first.startsWith('~')) return true
-  // Any named file with the exec bit or a script extension.
+  // Any word with a slash or a script extension that is (or might be) a runnable file:
+  // fail closed when the path can't be checked.
   return tokens.slice(1).some(t => {
     if (/\.(?:sh|py|js|mjs|cjs|ts|pl|rb|php|lua)$/.test(t)) return true
-    try { return t.startsWith('/') && (statSync(t).mode & 0o111) !== 0 && statSync(t).isFile() } catch { return false }
+    if (!t.includes('/')) return false
+    const p = t.startsWith('/') ? t : t.startsWith('~/') ? join(homedir(), t.slice(2)) : PROJECT_DIR ? join(PROJECT_DIR, t) : ''
+    if (!p) return true
+    try { const st = statSync(p); return st.isFile() && (st.mode & 0o111) !== 0 } catch { return false }
   })
 }
 
@@ -481,7 +487,7 @@ function mayRunFile(tokens: string[]): boolean {
 // shortened). Returns null when no safe rule can be derived; then the request
 // only gets Allow/Deny.
 function permissionRule(tool_name: string, input_preview: string): string | null {
-  if (tool_name.startsWith('mcp__')) return READ_ONLY_MCP.test(tool_name.split('__').slice(2).join('__')) ? tool_name : null
+  if (tool_name.startsWith('mcp__')) return (n => READ_ONLY_MCP.test(n) && !STATE_CHANGING_MCP.test(n))(tool_name.split('__').slice(2).join('__')) ? tool_name : null
   if (input_preview.includes('⋯') || input_preview.includes('…')) return null
   let input: Record<string, unknown> = {}
   const trimmed = input_preview.trim()
@@ -538,7 +544,10 @@ function permissionRule(tool_name: string, input_preview: string): string | null
       if (parts.some(s => s === '..' || s.startsWith('.') || s === 'bin')) return null
       // Never a lasting rule for code that runs by itself: executable files and the
       // targets of Claude Code hooks (often symlinked into a repo's scripts/ folder).
-      if (tool_name !== 'Read' && (isExecutable(p) || hookTargets().has(realOrSelf(p)))) return null
+      if (tool_name !== 'Read') {
+        const targets = hookTargets()
+        if (!targets || isExecutable(p) || targets.has(realOrSelf(p))) return null
+      }
       // Reading: the whole project the file is in (its git repository, else its
       // directory), so reading the next file there doesn't ask again. Writing:
       // just this file, since a directory glob would also cover nested .git/.claude
@@ -566,8 +575,9 @@ function realOrSelf(p: string): string {
 function isExecutable(p: string): boolean {
   try { const st = statSync(p); return st.isFile() && (st.mode & 0o111) !== 0 } catch { return false }
 }
-// Real paths of every command in the hooks of the user and project settings.
-function hookTargets(): Set<string> {
+// Real paths of every command in the hooks of the user and project settings. null when a
+// hook command uses a variable we can't resolve: then no Edit rule at all (fail closed).
+function hookTargets(): Set<string> | null {
   const out = new Set<string>()
   const files = [join(homedir(), '.claude', 'settings.json'), join(homedir(), '.claude', 'settings.local.json')]
   if (PROJECT_DIR) files.push(join(PROJECT_DIR, '.claude', 'settings.json'), join(PROJECT_DIR, '.claude', 'settings.local.json'))
@@ -576,7 +586,14 @@ function hookTargets(): Set<string> {
     try { hooks = JSON.parse(readFileSync(f, 'utf8')).hooks ?? {} } catch { continue }
     for (const groups of Object.values(hooks)) for (const g of (Array.isArray(groups) ? groups : []))
       for (const h of (Array.isArray(g?.hooks) ? g.hooks : [])) if (typeof h?.command === 'string')
-        for (const w of h.command.split(/\s+/)) if (w.includes('/')) out.add(realOrSelf(w.replace(/^~(?=\/)/, homedir())))
+        for (const raw of h.command.split(/\s+/)) {
+          const w = raw.replace(/^['"]+|['"]+$/g, '')
+            .replace(/\$\{?CLAUDE_PROJECT_DIR\}?/g, PROJECT_DIR ?? '\0')
+            .replace(/\$\{?HOME\}?/g, homedir())
+            .replace(/^~(?=\/)/, homedir())
+          if (/\$|\0/.test(w)) return null
+          if (w.includes('/')) out.add(realOrSelf(w.startsWith('/') ? w : join(PROJECT_DIR ?? homedir(), w)))
+        }
   }
   return out
 }
