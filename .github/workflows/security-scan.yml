@@ -3,6 +3,8 @@ name: security-scan
 # Semgrep only downloads its rules; no code is sent to Semgrep (metrics off, no login).
 # On push and pull request only NEW findings fail the run (baseline = the previous commit); the weekly
 # run scans everything and is informational. Accepted findings: .gitleaksignore / .semgrepignore.
+# Trivy (dependencies) fails the run on fixable HIGH/CRITICAL vulnerabilities in the lockfiles;
+# accepted findings go in .trivyignore (one CVE id per line, with a comment why).
 on:
   push:
   pull_request:
@@ -78,3 +80,20 @@ jobs:
           else
             semgrep scan $ARGS .
           fi
+
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: trivy
+        env:
+          TRIVY_VERSION: "0.76.1"
+          TRIVY_SHA256: "c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0"
+        run: |
+          curl -sSfL -o trivy.tgz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  trivy.tgz" | sha256sum -c -
+          tar xzf trivy.tgz trivy
+          # Fixable HIGH/CRITICAL vulnerabilities in dependency lockfiles fail the run.
+          # No findings and no lockfiles both exit 0. Accepted CVEs: .trivyignore.
+          ./trivy fs --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+            --no-progress --exit-code 1 --db-repository public.ecr.aws/aquasecurity/trivy-db .
