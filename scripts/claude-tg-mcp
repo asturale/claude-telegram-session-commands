@@ -170,18 +170,30 @@ def session_main():
     return main_checkout(cwd) if cwd else None
 
 
+def listable(name):
+    """Without Telegram the session can't be reached to turn it back on. The
+    name is typed into the session: no control characters, and `all` is a
+    keyword of /mcp that would hit every server."""
+    return (name.isprintable() and name == name.strip() and name != "all"
+            and name != "telegram" and not name.startswith("plugin:telegram:"))
+
+
 def slug(name):
     """A server name as a button value: names can hold spaces, buttons can't."""
     return re.sub(r"[^A-Za-z0-9_.:-]", "_", name)[:36]
 
 
 def servers(d, project):
-    """{name: on?} for the project. Telegram is left out: without it the
-    session can't be reached, so it can't be turned back on from here."""
-    p = d.get("projects", {}).get(project, {})
+    """{name: on?} for the project. Connectors and plugin servers are in no
+    project's mcpServers, so they are known from the disabled lists.
+    shortcut: one that is on in every project isn't listed, add a state file if that matters."""
+    projects = d.get("projects", {})
+    p = projects.get(project, {})
     off = p.get("disabledMcpServers", [])
-    names = [*p.get("mcpServers", {}), *off]
-    return {n: n not in off for n in sorted(set(names), key=str.lower) if not n.startswith("plugin:telegram:")}
+    shared = [n for q in projects.values() for n in q.get("disabledMcpServers", [])
+              if n.startswith(("claude.ai ", "plugin:"))]
+    names = {*p.get("mcpServers", {}), *off, *shared}
+    return {n: n not in off for n in sorted(names, key=str.lower) if listable(n)}
 
 
 def rows(d, project, skip=()):
@@ -200,17 +212,21 @@ def toggle(value):
         tg_send("No Telegram session found.")
         sys.exit(1)
     project = main_checkout(cwd) or cwd
-    name = next((n for n in servers(load(), project) if slug(n) == wanted), None)
-    if not name:
-        tg_send(f"{wanted} is not one of your MCP servers.")
+    names = [n for n in servers(load(), project) if slug(n) == wanted]
+    if len(names) != 1:
+        tg_send(f"{wanted} doesn't match exactly one of your MCP servers.")
         sys.exit(1)
+    name = names[0]
     word = "enable" if action == "on" else "disable"
     # Variables of the session the plugin runs in make `claude attach` refuse.
     env = {k: v for k, v in os.environ.items() if k not in
            ("CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID")}
-    subprocess.run([str(BIN / "claude-tg-type"), sid, f"/mcp {word} {name}"], env=env)
+    if subprocess.run([str(BIN / "claude-tg-type"), sid, f"/mcp {word} {name}"], env=env).returncode:
+        tg_send(f"{name}: nothing changed. The session is waiting on a prompt or is not reachable.")
+        sys.exit(1)
     for _ in range(10):  # claude-tg-type can't see whether it arrived
-        if servers(load(), project).get(name) == (action == "on"):
+        off = load().get("projects", {}).get(project, {}).get("disabledMcpServers", [])
+        if (name in off) == (action == "off"):
             tg_send(f"{name} is {action}.")
             return
         time.sleep(1)

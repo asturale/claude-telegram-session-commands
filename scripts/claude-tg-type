@@ -84,6 +84,9 @@ if mode:
     close()
     print(old, now)
     sys.exit(0 if now == want else 1)
+if not key and shown(screen, strict=True) is None:
+    close()
+    sys.exit("no input box: a dialog may be open, Enter would answer it")
 if key:
     os.write(fd, key)
     screen += drain(3)
