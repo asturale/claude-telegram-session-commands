@@ -100,6 +100,7 @@ For a machine nobody logs in to, use a long-lived token: run
 | `claude-tg-patch-plugin` | every start | Applies `server.ts` and `relay.ts` from this repository to the installed plugin |
 | `claude-tg-usage-guard` | `PreToolUse` hook, timer | Pauses sessions near your plan limits and resumes them after the reset (see below) |
 | `claude-tg-accept` | `/accept` | acceptEdits in place (Shift+Tab) until the session's next turn ends or the time is up (default 30 min), then back; for file edits auto mode denied, which the overrule button can't cover |
+| `claude-tg-statusline` | status line | Shows the plan limits and stores them for the usage guard and `/usage`, also with a long-lived token |
 | `claude-tg-force` | `/force` | Takes the session out of the usage guard and resumes it if it was paused |
 | `claude-tg-overrule` | `PermissionDenied` + `PreToolUse` hooks | "Do it anyway" button when auto mode denies a call (see below) |
 | `tg-send` | side sessions, errors | Sends a message to you through the Bot API |
@@ -148,6 +149,18 @@ the hook to `~/.claude/settings.json`:
 and `TELEGRAM_FORCE_CMD` to the plugin's `.env`. It applies to every Claude
 Code session on the machine, also ones not started from Telegram. To turn it
 off for a while: `touch ~/.local/state/claude-tg/usage-guard/off`.
+
+With a long-lived token (`claude setup-token`) the usage endpoint isn't readable.
+Then let the status line feed the guard: Claude Code passes it the limits from its
+last API response. In `~/.claude/settings.json`:
+
+```json
+"statusLine": { "type": "command", "command": "/home/you/.local/bin/claude-tg-statusline" }
+```
+
+Claude Code reports the 5-hour window only while there is one, so the guard
+then checks the week alone. The values are as fresh as the last answer of any
+session on the machine.
 
 The guard checks between tool calls, so a long turn can still go a few percent
 past the cap. That's why the default is 80% and not 95%.
