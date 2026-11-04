@@ -160,7 +160,8 @@ last API response. In `~/.claude/settings.json`:
 
 Claude Code reports the 5-hour window only while there is one, so the guard
 then checks the week alone. The values are as fresh as the last answer of any
-session on the machine.
+session on the machine. `/usage` shows them with that time ("as of Wed 19:40,
+Claude Code's last reply") and leaves out a window whose reset has passed.
 
 The guard checks between tool calls, so a long turn can still go a few percent
 past the cap. That's why the default is 80% and not 95%.

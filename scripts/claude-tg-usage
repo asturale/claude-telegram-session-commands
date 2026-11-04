@@ -6,7 +6,9 @@
    ~/.config/claude-tg.env), else the interactive login in
    ~/.claude/.credentials.json. The endpoint rate-limits hard, so the answer is
    cached for 10 minutes and retry-after is respected
-   (~/.local/state/claude-tg/usage.json).
+   (~/.local/state/claude-tg/usage.json). claude-tg-statusline fills the same
+   cache from Claude Code's own rate-limit data, the only source with a
+   long-lived token. If the endpoint can't be read, the cache is shown with its time.
 2. Always: today's local token usage, added up from all session transcripts.
 """
 import json, os, time, urllib.error, urllib.request
@@ -44,12 +46,9 @@ def plan_usage():
     now = time.time()
     if st.get("data") and now - st.get("fetched", 0) < CACHE_S:
         return st["data"], None
-    if now < st.get("retry_at", 0):
-        mins = int((st["retry_at"] - now) // 60) + 1
-        return st.get("data"), f"limits unavailable right now (try again in ~{mins} min)"
     tok = token()
-    if not tok:
-        return None, "no token found"
+    if now < st.get("retry_at", 0) or not tok:
+        return stale(st)
     req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage", headers={
         "Authorization": f"Bearer {tok}", "anthropic-beta": "oauth-2025-04-20"})
     STATE.parent.mkdir(parents=True, exist_ok=True)
@@ -62,11 +61,18 @@ def plan_usage():
         if e.code == 429:
             st["retry_at"] = now + int(e.headers.get("retry-after") or 600)
             STATE.write_text(json.dumps(st))
-            mins = int((st["retry_at"] - now) // 60) + 1
-            return st.get("data"), f"limits unavailable right now (try again in ~{mins} min)"
-        return None, f"fetching limits failed (HTTP {e.code})"
-    except (urllib.error.URLError, TimeoutError, ValueError) as e:
-        return None, f"fetching limits failed ({e})"
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        pass
+    return stale(st)
+
+
+def stale(st):
+    """Endpoint unreadable (a long-lived token never can): the cached limits, with their time."""
+    if not st.get("data"):
+        return None, "limits unavailable; with a long-lived token, set claude-tg-statusline as the status line"
+    t = datetime.fromtimestamp(st.get("fetched", 0)).strftime("%a %H:%M")
+    src = "Claude Code's last reply" if st.get("source") == "statusline" else "last read"
+    return st["data"], f"as of {t}, {src}"
 
 
 def fmt_plan(data):
@@ -80,9 +86,12 @@ def fmt_plan(data):
         if val.get("resets_at"):
             try:
                 t = datetime.fromisoformat(val["resets_at"].replace("Z", "+00:00")).astimezone()
-                line += f" (resets {t.strftime('%a %H:%M')})"
             except ValueError:
-                pass
+                t = None
+            if t and t.timestamp() <= time.time():
+                continue  # stale cache: this window has reset since
+            if t:
+                line += f" (resets {t.strftime('%a %H:%M')})"
         out.append(line)
     return out
 
