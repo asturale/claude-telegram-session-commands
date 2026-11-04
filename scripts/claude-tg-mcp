@@ -3,8 +3,11 @@
 
   claude-tg-mcp prepare <dir>  get a worktree ready for a background session
                                (claude-tg-session, on /model /mode /effort /reload)
-  claude-tg-mcp list           /mcp: your MCP servers the current session lacks,
-                               as `name<TAB>label` lines
+  claude-tg-mcp list           /mcp: buttons as `value<TAB>label` lines: servers
+                               that are on (✕) or off (+), then the ones a
+                               worktree session lacks
+  claude-tg-mcp on:<name>      /mcp tap: turn a server on or off in the running
+  claude-tg-mcp off:<name>     session (`/mcp enable|disable`, no restart)
   claude-tg-mcp <name>         /mcp tap: add that server for the session's repo
 
 Claude Code looks up MCP servers added with `claude mcp add` (local scope) per
@@ -23,7 +26,7 @@ prompt shows in the terminal only), and the names of your servers the session
 won't have. It only acts on a real linked worktree in <repo>/.claude/worktrees/
 with <repo> inside CLAUDE_TG_CWD, and exits 1 for anything else.
 """
-import json, os, subprocess, sys, tempfile, time
+import json, os, re, subprocess, sys, tempfile, time
 from pathlib import Path
 
 HOME = Path.home()
@@ -151,14 +154,83 @@ def prepare(wt):
     print(",".join(missing(d, main)))
 
 
-def session_main():
-    """Main checkout of the worktree the current Telegram session started in."""
+def session():
+    """(id, cwd) of the current Telegram session, or (None, None)."""
     cur = json.loads(subprocess.run([str(BIN / "claude-tg-current")], capture_output=True, text=True).stdout or "{}")
     agents = subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True).stdout
     for a in json.loads(agents or "[]"):
         if cur.get("id") and a.get("id") == cur["id"]:
-            return main_checkout(a.get("cwd", ""))
-    return None
+            return cur["id"], a.get("cwd", "")
+    return None, None
+
+
+def session_main():
+    """Main checkout of the worktree the current Telegram session started in."""
+    _, cwd = session()
+    return main_checkout(cwd) if cwd else None
+
+
+def listable(name):
+    """Without Telegram the session can't be reached to turn it back on. The
+    name is typed into the session: no control characters, and `all` is a
+    keyword of /mcp that would hit every server."""
+    return (name.isprintable() and name == name.strip() and name != "all"
+            and name != "telegram" and not name.startswith("plugin:telegram:"))
+
+
+def slug(name):
+    """A server name as a button value: names can hold spaces, buttons can't."""
+    return re.sub(r"[^A-Za-z0-9_.:-]", "_", name)[:36]
+
+
+def servers(d, project):
+    """{name: on?} for the project. Connectors and plugin servers are in no
+    project's mcpServers, so they are known from the disabled lists.
+    shortcut: one that is on in every project isn't listed, add a state file if that matters."""
+    projects = d.get("projects", {})
+    p = projects.get(project, {})
+    off = p.get("disabledMcpServers", [])
+    shared = [n for q in projects.values() for n in q.get("disabledMcpServers", [])
+              if n.startswith(("claude.ai ", "plugin:"))]
+    names = {*p.get("mcpServers", {}), *off, *shared}
+    return {n: n not in off for n in sorted(names, key=str.lower) if listable(n)}
+
+
+def rows(d, project, skip=()):
+    """Button lines, servers that are on first."""
+    s = {n: on for n, on in servers(d, project).items() if n not in skip}
+    return ([f"off:{slug(n)}\t{n} ✕" for n in s if s[n]]
+            + [f"on:{slug(n)}\t+ {n}" for n in s if not s[n]])
+
+
+def toggle(value):
+    """Type /mcp enable|disable into the session and check that it took. Only
+    a configured name is typed, so a button value never reaches the session."""
+    action, _, wanted = value.partition(":")
+    sid, cwd = session()
+    if not sid:
+        tg_send("No Telegram session found.")
+        sys.exit(1)
+    project = main_checkout(cwd) or cwd
+    names = [n for n in servers(load(), project) if slug(n) == wanted]
+    if len(names) != 1:
+        tg_send(f"{wanted} doesn't match exactly one of your MCP servers.")
+        sys.exit(1)
+    name = names[0]
+    word = "enable" if action == "on" else "disable"
+    # Variables of the session the plugin runs in make `claude attach` refuse.
+    env = {k: v for k, v in os.environ.items() if k not in
+           ("CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID")}
+    if subprocess.run([str(BIN / "claude-tg-type"), sid, f"/mcp {word} {name}"], env=env).returncode:
+        tg_send(f"{name}: nothing changed. The session is waiting on a prompt or is not reachable.")
+        sys.exit(1)
+    for _ in range(10):  # claude-tg-type can't see whether it arrived
+        off = load().get("projects", {}).get(project, {}).get("disabledMcpServers", [])
+        if (name in off) == (action == "off"):
+            tg_send(f"{name} is {action}.")
+            return
+        time.sleep(1)
+    tg_send(f"{name}: not {action} yet. If the session is busy, it follows after this turn.")
 
 
 def tg_send(text):
@@ -170,9 +242,16 @@ if __name__ == "__main__":
     if args[:1] == ["prepare"] and len(args) == 2:
         prepare(args[1])
     elif args[:1] == ["list"]:
-        main = session_main()
-        for n in (missing(load(), main) if main else []):
-            print(f"{n}\t+ {n}")
+        _, cwd = session()
+        main = main_checkout(cwd) if cwd else None
+        d = load()
+        lacks = missing(d, main) if main else []
+        if cwd:
+            print("\n".join(rows(d, main or cwd, lacks)))
+        for n in lacks:
+            print(f"{n}\t+ {n} (then /reload)")
+    elif len(args) == 1 and re.match(r"(on|off):", args[0]):
+        toggle(args[0])
     elif len(args) == 1:
         main = session_main()
         if not main:
