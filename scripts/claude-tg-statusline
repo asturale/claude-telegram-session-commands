@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Status line (settings.json "statusLine"): shows the plan limits and stores them
+for claude-tg-usage-guard and /usage.
+
+Claude Code hands the status line the limits it read from its last API response
+(rate_limits in the JSON on stdin), also with a long-lived token, which can't
+read api.anthropic.com/api/oauth/usage. They go into the usage cache in the
+endpoint's shape, so the guard and /usage use them while they are fresh. The
+5-hour window is only there while Claude Code reports one. A window whose reset
+has passed is left out: an idle session keeps showing its last response.
+"""
+import json, os, sys, time
+from datetime import datetime, timezone
+from pathlib import Path
+
+CACHE = Path.home() / ".local/state/claude-tg/usage.json"  # shared with claude-tg-usage(-guard)
+WINDOWS = (("five_hour", "5h"), ("seven_day", "week"))
+
+
+def windows(limits, now):
+    data = {}
+    for key, _ in WINDOWS:
+        w = limits.get(key)
+        if not isinstance(w, dict) or not isinstance(w.get("used_percentage"), (int, float)):
+            continue
+        reset = w.get("resets_at")
+        if isinstance(reset, (int, float)):
+            if reset <= now:
+                continue
+            reset = datetime.fromtimestamp(reset, timezone.utc).isoformat()
+        else:
+            reset = None
+        data[key] = {"utilization": float(w["used_percentage"]), "resets_at": reset}
+    return data
+
+
+def store(data, now):
+    try:
+        st = json.loads(CACHE.read_text())
+    except (OSError, ValueError):
+        st = {}
+    if not isinstance(st, dict):
+        st = {}
+    st.update(data=data, fetched=now, source="statusline")  # keeps the endpoint's retry_at
+    CACHE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CACHE.with_name(f".usage.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(st))
+    tmp.replace(CACHE)
+
+
+data = {}
+try:
+    now = time.time()
+    limits = json.load(sys.stdin).get("rate_limits")
+    data = windows(limits, now) if isinstance(limits, dict) else {}
+    if data:
+        store(data, now)
+except Exception:  # a status line must never crash; the guard then just has no fresh data
+    pass
+print(" · ".join(f"{label} {data[key]['utilization']:.0f}%" for key, label in WINDOWS if key in data))

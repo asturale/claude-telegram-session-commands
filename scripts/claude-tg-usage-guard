@@ -21,7 +21,8 @@ types a "continue" message into the session with claude-tg-type. A session you
 `/force` is exempt for the rest of its life.
 
 Limits come from api.anthropic.com/api/oauth/usage, cached for 3 minutes in the
-same file /usage uses. If they can't be read, nothing is blocked.
+same file /usage uses. claude-tg-statusline writes the same cache from Claude
+Code's own rate-limit data, which also works with a long-lived token. If they can't be read, nothing is blocked.
 Turn the guard off: `touch ~/.local/state/claude-tg/usage-guard/off`.
 """
 import json, os, re, shutil, subprocess, sys, time, urllib.error, urllib.request
