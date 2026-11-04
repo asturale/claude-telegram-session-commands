@@ -1304,8 +1304,8 @@ const pickers = {
     prompt: 'Side tasks (tap for the result):', empty: 'No side tasks running.' },
   skill: { env: 'TELEGRAM_SKILL_CMD', description: 'Run a skill in the session',
     prompt: 'Run which skill?', empty: 'No skills found.' },
-  mcp: { env: 'TELEGRAM_MCP_CMD', description: 'Add an MCP server to a worktree session',
-    prompt: 'Add which MCP server? (then /reload)', empty: 'The session has all your MCP servers.' },
+  mcp: { env: 'TELEGRAM_MCP_CMD', description: 'Turn MCP servers on or off',
+    prompt: 'MCP servers: ✕ turns one off, + turns one on.', empty: 'No MCP servers found.' },
 }
 
 // Button rows for one page of `<cmd> list [offset]`, or null if it printed none.
@@ -1386,8 +1386,10 @@ bot.callbackQuery(/^pick:(resume|tasks|skill|mcp):(go|result|stop|page|info):([A
     return
   }
   if (name === 'mcp') {
-    await ctx.answerCallbackQuery({ text: `Adding ${value}…` }).catch(() => {})
-    await ctx.editMessageText(`Adding ${value}…`).catch(() => {})
+    const doing = value.startsWith('off:') ? 'Turning off' : value.startsWith('on:') ? 'Turning on' : 'Adding'
+    const what = `${doing} ${value.replace(/^(on|off):/, '')}…`
+    await ctx.answerCallbackQuery({ text: what }).catch(() => {})
+    await ctx.editMessageText(what).catch(() => {})
     runDetached(cmd, [value])
     return
   }
