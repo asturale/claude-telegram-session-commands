@@ -313,7 +313,7 @@ async function runRelay(): Promise<void> {
   let pinTimer: ReturnType<typeof setTimeout> | null = null
   let pinning = Promise.resolve('')
   const GRACE_MS = 15_000 // a disconnected session may come back within this
-  const gone = new Map<string, { timer: ReturnType<typeof setTimeout>, slot: number }>() // by sessionId
+  const gone = new Map<string, { timer: ReturnType<typeof setTimeout>, slot: number, wasActive: boolean }>() // by sessionId
   const MODELS = (process.env.TELEGRAM_MODELS ?? 'opus=opus,sonnet=sonnet,haiku=haiku')
     .split(',').map(e => e.trim()).filter(Boolean)
     .map(e => {
@@ -1300,7 +1300,9 @@ async function runRelay(): Promise<void> {
         }
         // After a relay restart, the session that was active stays active.
         const wasActive = restarting() && [pid, took?.pid].includes(restart!.active ?? -1)
-        if (!old && (!restarting() || !active || wasActive || (inherited && inherited === active))) setActive(client)
+        // A brief reconnect gets the active spot back only if it had it; it doesn't steal it.
+        const activate = back ? back.wasActive || !active : !restarting() || !active || wasActive || (inherited && inherited === active)
+        if (!old && activate) setActive(client)
         else pushState()
         syncPins()
         flushWaiting()
@@ -1319,7 +1321,8 @@ async function runRelay(): Promise<void> {
       const c = client
       clients.splice(clients.indexOf(c), 1)
       log(`session ${c.slot} disconnected (pid ${c.pid})`)
-      if (active === c) {
+      const wasActive = active === c
+      if (wasActive) {
         const next = [...clients].sort((a, b) => b.lastActive - a.lastActive)[0] ?? null
         setActive(next)
         if (!next) rmSync(BOT_PID, { force: true })
@@ -1344,7 +1347,7 @@ async function runRelay(): Promise<void> {
       if (c.closing || !c.sessionId) return tell()
       const id = c.sessionId
       if (gone.has(id)) clearTimeout(gone.get(id)!.timer)
-      gone.set(id, { slot: c.slot, timer: setTimeout(() => { gone.delete(id); tell() }, GRACE_MS) })
+      gone.set(id, { slot: c.slot, wasActive, timer: setTimeout(() => { gone.delete(id); tell() }, GRACE_MS) })
     })
   })
   server.on('error', err => {
