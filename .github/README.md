@@ -211,7 +211,7 @@ Bot API itself.
 | Command | What it does | Configured by |
 | --- | --- | --- |
 | `/sessions` | Open sessions as buttons: tap one to switch to it, 📈 to follow it with `/progress` without switching, ✕ to close it | `TELEGRAM_SESSION_INFO_CMD` (optional) |
-| `/new [#name] [prompt]` | Open an extra session next to the others, on `TELEGRAM_DEFAULT_MODEL` (or the first `TELEGRAM_MODELS` entry); `#mail` names it right away; a photo or file captioned `/new …`, and messages forwarded right after `/new` or `/2 text`, go to that session (bundled with the prompt); with `TELEGRAM_NEW_MODEL_MENU=1`, pick a model first | `TELEGRAM_NEW_CMD`, `TELEGRAM_MODELS` |
+| `/new [#name] [prompt]` | Open an extra session next to the others, on `TELEGRAM_DEFAULT_MODEL` (or the first `TELEGRAM_MODELS` entry); `#mail` names it right away; everything you send after `/new` (text, screenshots, forwards) goes to the new session until it is there, unless you switch sessions first; forwards, photos and files sent right after `/2 text` go to session 2; with `TELEGRAM_NEW_MODEL_MENU=1`, pick a model first | `TELEGRAM_NEW_CMD`, `TELEGRAM_MODELS` |
 | `/switch [n]` | Switch to session n; without a number, the session list | — |
 | `/close [n]` | Close the active session (or session n), after a confirmation | `TELEGRAM_CLOSE_CMD` |
 | `/name [n] [name]` | Name the active session (or session n), so its label reads `2·mail` instead of `2·sonnet`; no name goes back to the model | — |
