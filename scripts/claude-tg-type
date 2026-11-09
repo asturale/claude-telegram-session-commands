@@ -51,7 +51,8 @@ def shown(screen, strict=False):
     a footer drawn whole under the input box counts (the first screen; after a
     Shift+Tab only the label is redrawn), not the same words in the conversation."""
     plain = re.sub(rb"\x1b\[[0-9;?>]*[A-Za-z]|\x1b\][^\x07]*\x07", b" ", screen).decode("utf8", "replace")
-    head = r"─\r\s+\S{1,3} " if strict else ""  # right under the input box's bottom rule, after the icon
+    # under the input box's bottom rule, after the icon; a status line may sit in between
+    head = r"─\r(?:[^─\r]*\r){0,4}\s+\S{1,3} " if strict else ""
     hits = [(x.end(), m) for m, t in FOOTER.items() if m != "default"
             for x in re.finditer(head + re.escape(t), plain)]
     if not hits or plain.rfind("to cancel") > max(hits)[0]:
