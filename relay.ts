@@ -469,15 +469,20 @@ async function runRelay(): Promise<void> {
     if (pinTimer) clearTimeout(pinTimer)
     pinTimer = setTimeout(() => {
       pinTimer = null
-      const pids = clients.map(c => String(c.pid)).sort()
+      // Right after a relay restart the sessions reconnect one by one: keep the
+      // ones the previous relay had pinned too, or the daemon may retire them meanwhile.
+      const pids = [...new Set([...clients.map(c => c.pid), ...(restarting() ? restart!.sessions.map(s => s.pid) : [])])]
+        .map(String).sort()
       if (pids.join(' ') === pinned) return
       pinned = pids.join(' ')
       // One at a time, in order: each run unpins what the previous one pinned.
       pinning = pinning.then(() => runWith(PIN_CMD, pids.length ? ['--all', ...pids] : ['--none'], undefined, false))
     }, delay)
   }
+  // Once the restart window is over, pin only the sessions that came back.
+  if (restarting()) setTimeout(() => syncPins(), restartUntil - Date.now() + 100)
 
-  const runWith = (cmd: string, args: string[], pid: number | undefined, detached: boolean, timeout = 20000): Promise<string> => {
+  const runWith =(cmd: string, args: string[], pid: number | undefined, detached: boolean, timeout = 20000): Promise<string> => {
     const env = { ...process.env, ...(pid ? { TELEGRAM_SESSION_PID: String(pid) } : {}) }
     if (detached) {
       const child = spawn(cmd, args, { detached: true, stdio: 'ignore', env })
