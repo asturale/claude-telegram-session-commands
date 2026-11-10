@@ -166,7 +166,8 @@ stop_old() {
 
 before=$(cat "$PIDFILE" 2>/dev/null)
 srv="${TELEGRAM_SESSION_PID:-$before}"
-[ -z "$adds" ] && [ -n "$srv" ] && printf '{"from": %s}\n' "$srv" > "$HANDOVER"
+# /clear starts a new conversation: same number, but no name, so it gets its own.
+[ -z "$adds" ] && [ -n "$srv" ] && printf '{"from": %s, "fresh": %s}\n' "$srv" "$([ "$mode" = clear ] && echo true || echo false)" > "$HANDOVER"
 # --channels is variadic: keep it before the other options, or it eats the prompt.
 [ -n "$effort" ] && extra+=(--effort "$effort")
 start() {

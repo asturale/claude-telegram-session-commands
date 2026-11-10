@@ -251,7 +251,9 @@ Bot API itself.
   own can use it to add the same label.
 - Names are stored per conversation id in `session-names.json` in the state
   directory, so a `/resume` picker can show them for closed conversations too.
-  A session that replaces another one through `relay-handover` keeps its name.
+  A session that replaces another one through `relay-handover` keeps its name,
+  unless the handover has `"fresh": true` (`/clear` writes that: a new
+  conversation gets a new name).
 - A script can switch the active session: connect to `relay.sock` and send
   `{"t": "use", "pid": <server pid>}` followed by a newline. The relay answers
   `{"ok": true}` or `{"ok": false}`. A `/resume` picker can use this to offer

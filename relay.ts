@@ -69,7 +69,8 @@
  * bot.pid holds the server.ts pid of the active session, as it does without
  * the relay. Before restarting a session in place (/clear, /model …), a script
  * can write that pid to relay-handover; the next session to connect within two
- * minutes then takes over its number instead of getting a new one.
+ * minutes then takes over its number instead of getting a new one, and its
+ * name unless the handover says {"fresh": true} (/clear: a new conversation).
  *
  * A script can also switch the active session: connect to relay.sock and send
  * {"t": "use", "pid": <server.ts pid>}; the relay answers {"ok": true|false}.
@@ -1250,19 +1251,21 @@ async function runRelay(): Promise<void> {
         let slot = 0
         let inherited: Client | null = null
         let took: Snapshot['sessions'][number] | undefined // replaced before it reconnected
+        let fresh = false // /clear: a new conversation, so it gets its own name
         try {
           // Left for the session that replaces `from`. After a relay restart
           // all sessions reconnect at once: those the previous relay knew
           // aren't the replacement, so leave it for the next one.
           const h = JSON.parse(readFileSync(HANDOVER, 'utf8'))
           const from = Number(h.from)
-          const fresh = Date.now() - statSync(HANDOVER).mtimeMs < HANDOVER_MS
-          if (fresh && !prev && from !== pid) {
+          const recent = Date.now() - statSync(HANDOVER).mtimeMs < HANDOVER_MS
+          if (recent && !prev && from !== pid) {
             inherited = byPid(from)
             if (!inherited && restarting()) took = restart!.sessions.find(s => s.pid === from)
             if (took) replacedPids.add(from)
+            fresh = h.fresh === true
           }
-          if (!fresh || inherited || took) rmSync(HANDOVER, { force: true })
+          if (!recent || inherited || took) rmSync(HANDOVER, { force: true })
         } catch {}
         if (inherited) {
           inherited.replaced = true
@@ -1280,15 +1283,16 @@ async function runRelay(): Promise<void> {
         }
         if (!slot && prev && !clients.some(c => c.slot === prev.slot)) slot = prev.slot
         if (!slot) for (slot = 1; clients.some(c => c.slot === slot) || reserved(slot); slot++);
+        const keptName = fresh ? '' : inherited?.name || took?.name
         client = {
           sock, pid, slot, sessionId,
-          name: inherited?.name || took?.name || (sessionId && loadNames()[sessionId]) || prev?.name || '',
+          name: keptName || (sessionId && loadNames()[sessionId]) || prev?.name || '',
           model: inherited?.model || took?.model || prev?.model || '', status: '', lastActive: Date.now(), replaced: old, closing: false,
           nameTries: 0, nameTimer: null,
         }
         clients.push(client)
-        // A fork (/model, /clear …) gets a new conversation id: keep the name.
-        if (inherited?.name || took?.name) saveName(client)
+        // A fork (/model, /mode …) gets a new conversation id: keep the name.
+        if (keptName) saveName(client)
         const replaces = inherited?.pid ?? took?.pid
         log(`session ${slot} connected (pid ${client.pid}${replaces ? `, replaces ${replaces}` : ''}${old ? ', replaced' : ''}${back ? ', reconnected' : ''})`)
         expectReady = expectReady.filter(e => e.until > Date.now())
