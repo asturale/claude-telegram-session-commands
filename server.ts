@@ -427,6 +427,9 @@ const mcp = new Server(
 // Stores full permission details for "See more" expansion keyed by request_id.
 // `rule` is the permission rule an "Always" tap would add (null: no such button).
 const pendingPermissions = new Map<string, { tool_name: string; description: string; input_preview: string; rule: string | null }>()
+// When this plugin's own reply/react last ran: a PermissionRequest hook can
+// approve those before the owner sees the prompt (plan-mode sessions).
+let ownToolAt = 0
 
 // "Always allow". The channel protocol only carries allow (this once) and
 // deny, so the plugin persists the rule itself: it adds it to the allow list in
@@ -705,7 +708,13 @@ mcp.setNotificationHandler(
   }),
   async ({ params }) => {
     const { request_id, tool_name, description, input_preview } = params
-    const rule = ALWAYS_ENABLED && PROJECT_DIR ? permissionRule(tool_name, input_preview) : null
+    if (/telegram.*__(reply|react)$/.test(tool_name)) {
+      // Asked for our own tool: give a hook a moment; if the call already ran, there is nothing to ask.
+      const asked = Date.now()
+      await new Promise(r => setTimeout(r, 1500))
+      if (ownToolAt >= asked) return
+    }
+    const rule =ALWAYS_ENABLED && PROJECT_DIR ? permissionRule(tool_name, input_preview) : null
     pendingPermissions.set(request_id, { tool_name, description, input_preview, rule })
     const access = loadAccess()
     const text = `🔐 Permission: ${tool_name}` + (rule ? `\n♾ Always allow adds: ${rule}\n   = ${describeRule(rule)}` : '')
@@ -799,6 +808,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 mcp.setRequestHandler(CallToolRequestSchema, async req => {
   const args = (req.params.arguments ?? {}) as Record<string, unknown>
+  if (req.params.name === 'reply' || req.params.name === 'react') ownToolAt = Date.now()
   try {
     switch (req.params.name) {
       case 'reply': {
