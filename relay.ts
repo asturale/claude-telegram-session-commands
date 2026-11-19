@@ -75,7 +75,9 @@
  * A script can also switch the active session: connect to relay.sock and send
  * {"t": "use", "pid": <server.ts pid>}; the relay answers {"ok": true|false}.
  * Or open a new session: {"t": "new", "text": "[#name] <prompt>"}, as if the
- * owner sent `/new [#name] <prompt>`; answer {"ok": true|false}.
+ * owner sent `/new [#name] <prompt>`; answer {"ok": true|false}. With
+ * "mode": "plan" the session starts in plan mode (TELEGRAM_NEW_CMD gets
+ * CLAUDE_TG_NEW_PERM=plan); no other mode is accepted.
  */
 
 import { Api, type Bot } from 'grammy'
@@ -485,8 +487,8 @@ async function runRelay(): Promise<void> {
   // Once the restart window is over, pin only the sessions that came back.
   if (restarting()) setTimeout(() => syncPins(), restartUntil - Date.now() + 100)
 
-  const runWith =(cmd: string, args: string[], pid: number | undefined, detached: boolean, timeout = 20000): Promise<string> => {
-    const env = { ...process.env, ...(pid ? { TELEGRAM_SESSION_PID: String(pid) } : {}) }
+  const runWith =(cmd: string, args: string[], pid: number | undefined, detached: boolean, timeout = 20000, extraEnv: Record<string, string> = {}): Promise<string> => {
+    const env = { ...process.env, ...(pid ? { TELEGRAM_SESSION_PID: String(pid) } : {}), ...extraEnv }
     if (detached) {
       const child = spawn(cmd, args, { detached: true, stdio: 'ignore', env })
       child.on('error', err => log(`${cmd} failed: ${err}`))
@@ -590,7 +592,7 @@ async function runRelay(): Promise<void> {
   // message once it connects (a photo or file with the prompt as its caption),
   // followed by whatever was sent after /new in the meantime, so a text and the
   // screenshots that upload after it arrive together.
-  const startNew = (model: string, text: string, update?: Update) => {
+  const startNew = (model: string, text: string, update?: Update, perm?: string) => {
     const nm = /^#(\S+)\s*([\s\S]*)$/.exec(text.trim())
     const name = nm ? nm[1].slice(0, 24) : undefined
     const prompt = (nm ? nm[2] : text).trim()
@@ -617,7 +619,7 @@ async function runRelay(): Promise<void> {
       if (opening === entry) opening = null
       notify(`The new session did not start${entry.updates.length ? `; ${entry.updates.length} message(s) sent to it were not delivered` : ''}.`)
     }, READY_MS)
-    void runWith(NEW_CMD!, [model], active?.pid, true)
+    void runWith(NEW_CMD!, [model], active?.pid, true, undefined, perm ? { CLAUDE_TG_NEW_PERM: perm } : {})
   }
 
   const newMenu = async (chat: string, prompt: string, update?: Update) => {
@@ -1238,13 +1240,15 @@ async function runRelay(): Promise<void> {
         // From a script, not a session: open a session as `/new <text>` from the owner would.
         const chat = ownerChats()[0]
         const text = typeof msg.text === 'string' ? msg.text.slice(0, 8000) : ''
-        const ok = !!(chat && text.trim() && NEW_CMD && DEFAULT_MODEL)
+        // Only plan mode can be asked for: a script may restrict a session, never loosen it.
+        const perm = msg.mode === 'plan' ? 'plan' : undefined
+        const ok = !!(chat && text.trim() && NEW_CMD && DEFAULT_MODEL && (msg.mode == null || perm))
         if (ok) {
           const id = Number(chat)
           startNew(DEFAULT_MODEL, text, { update_id: 0, message: {
             message_id: 0, date: Math.floor(Date.now() / 1000),
             chat: { id, type: 'private', first_name: '' }, from: { id, is_bot: false, first_name: '' }, text,
-          } } as Update)
+          } } as Update, perm)
           notify(`Opening a new session on ${modelLabel(DEFAULT_MODEL)}…`)
         }
         writeLine(sock, { ok })
