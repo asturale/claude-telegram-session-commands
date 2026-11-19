@@ -74,6 +74,8 @@
  *
  * A script can also switch the active session: connect to relay.sock and send
  * {"t": "use", "pid": <server.ts pid>}; the relay answers {"ok": true|false}.
+ * Or open a new session: {"t": "new", "text": "[#name] <prompt>"}, as if the
+ * owner sent `/new [#name] <prompt>`; answer {"ok": true|false}.
  */
 
 import { Api, type Bot } from 'grammy'
@@ -1231,6 +1233,21 @@ async function runRelay(): Promise<void> {
           notify(`→ Now talking to ${label(c)}.`)
         }
         writeLine(sock, { ok: !!c })
+        sock.end()
+      } else if (msg.t === 'new' && !client) {
+        // From a script, not a session: open a session as `/new <text>` from the owner would.
+        const chat = ownerChats()[0]
+        const text = typeof msg.text === 'string' ? msg.text.slice(0, 8000) : ''
+        const ok = !!(chat && text.trim() && NEW_CMD && DEFAULT_MODEL)
+        if (ok) {
+          const id = Number(chat)
+          startNew(DEFAULT_MODEL, text, { update_id: 0, message: {
+            message_id: 0, date: Math.floor(Date.now() / 1000),
+            chat: { id, type: 'private', first_name: '' }, from: { id, is_bot: false, first_name: '' }, text,
+          } } as Update)
+          notify(`Opening a new session on ${modelLabel(DEFAULT_MODEL)}…`)
+        }
+        writeLine(sock, { ok })
         sock.end()
       } else if (msg.t === 'hello') {
         if (msg.version !== VERSION) {
