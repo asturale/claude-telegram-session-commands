@@ -138,6 +138,8 @@ case "$mode" in
     [ -z "$1" ] && { tg-send "No model given."; exit 1; }
     adds=1
     model="$1"; shift
+    # Set by the relay when a script asked for a restricted session (plan mode only).
+    [ "${CLAUDE_TG_NEW_PERM:-}" = plan ] && perm=plan
     # "/new /force <request>": the usage guard doesn't apply to the new session.
     req="$*"
     [[ "$req" =~ ^/force([[:space:]]+(.*))?$ ]] && { force=1; req=${BASH_REMATCH[2]}; }
