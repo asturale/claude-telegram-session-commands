@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""PermissionRequest hook for plan-mode sessions (claude-tg-session new, CLAUDE_TG_NEW_PERM=plan).
+
+Approves this plugin's reply/react so the session can still talk to the owner,
+but only without attachments: a file would leave the host. Anything else gets
+no decision, so the normal prompt is shown.
+"""
+import json
+import sys
+
+try:
+    req = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+tool = req.get("tool_name", "")
+inp = req.get("tool_input") or {}
+if tool in ("mcp__plugin_telegram_telegram__reply", "mcp__plugin_telegram_telegram__react") and not inp.get("files"):
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}))

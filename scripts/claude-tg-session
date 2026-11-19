@@ -144,9 +144,10 @@ case "$mode" in
       perm=plan
       # Plan mode asks before every non-read-only tool, allow rules (and a
       # PreToolUse allow) or not; a PermissionRequest hook answers that prompt,
-      # so the session can still talk to the owner. Only reply and react: they
-      # can only reach the allowlisted chats.
-      extra+=(--settings '{"hooks":{"PermissionRequest":[{"matcher":"^mcp__plugin_telegram_telegram__(reply|react)$","hooks":[{"type":"command","command":"echo '"'"'{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"allow\"}}}'"'"'"}]}]}}')
+      # so the session can still talk to the owner: only reply and react (they
+      # reach only the allowlisted chats), and only without attachments.
+      extra+=(--settings "$(python3 -c 'import json,sys; print(json.dumps({"hooks": {"PermissionRequest": [{"matcher": "^mcp__plugin_telegram_telegram__(reply|react)$", "hooks": [{"type": "command", "command": sys.argv[1]}]}]}}))' \
+        "$(dirname "$(readlink -f "$0")")/claude-tg-plan-allow")")
     fi
     # "/new /force <request>": the usage guard doesn't apply to the new session.
     req="$*"
