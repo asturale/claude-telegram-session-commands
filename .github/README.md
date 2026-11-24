@@ -192,7 +192,12 @@ your own, some notes from building that set:
   wait for the UI, send `/compact` + Enter (or a bare Esc to interrupt), and
   close the attach client. The session keeps running.
 - **Effort**: restart with `--effort <level>` rather than typing `/effort`.
-  Typing it also saves the level as the default for new sessions.
+  Typing it also saves the level as the default for new sessions; the
+  example script does that on purpose (`modelSettings.<model>.effortLevel`
+  in `~/.claude/settings.json`).
+- **Mode of a new session**: `/new` and `/resume` start in the default
+  permission mode, not in the mode of whichever session is active (a
+  plan-mode session, or one switched to accept edits for a moment).
 - **Usage**: the CLI's own `/usage` reads `api.anthropic.com/api/oauth/usage`.
   That endpoint rate-limits hard, so cache the answer and respect
   `retry-after`. Token totals per model can also be added up from the

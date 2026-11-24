@@ -6,13 +6,15 @@
 #   claude-tg-session mode <mode>          another permission mode: Shift+Tab in place,
 #                                          else same conversation (fork) in that mode
 #   claude-tg-session mode-inplace <mode>  only the Shift+Tab part (exit 1 if it can't)
-#   claude-tg-session effort <level>       same conversation (fork) with another effort level
+#   claude-tg-session effort <level>       same conversation (fork) with another effort level,
+#                                          also saved as the default for new sessions
 #   claude-tg-session reload               same conversation (fork), everything reloaded
 #   claude-tg-session resume <session-id>  an earlier conversation (fork): with the relay
 #                                          an extra session, without it it takes over
 #   claude-tg-session import <file> <title> a conversation copied from claude.ai, read from
 #                                          <file> (claude-tg-resume): like resume
 #   claude-tg-session new <model> [prompt] extra session next to the others (relay only)
+#   (new, resume and import start in CLAUDE_TG_PERMISSION_MODE and the default effort)
 #   claude-tg-session close                close this session (relay only)
 # With the relay (TELEGRAM_RELAY=1), TELEGRAM_SESSION_PID names the session to
 # act on; a replacement takes over its number through relay-handover.
@@ -41,6 +43,10 @@ get() { python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('$1',''))
 old_pid=$(get pid); old_id=$(get id); old_session=$(get sessionId)
 old_model=$(get model); old_perm=$(get perm); old_effort=$(get effort)
 echo "old: pid=$old_pid bg=$old_id session=$old_session model=$old_model perm=$old_perm effort=$old_effort"
+# Only a restart of this session keeps its mode and effort. Another conversation
+# starts from the defaults, not from whichever session happens to be active
+# (which may be a plan-mode session, or one switched to acceptEdits for a while).
+case "$mode" in new|resume|import) old_perm=""; old_effort="" ;; esac
 
 model="${old_model:-$CLAUDE_TG_MODEL}"
 perm="${old_perm:-$CLAUDE_TG_PERMISSION_MODE}"
@@ -231,6 +237,24 @@ if [ -z "$ok" ]; then
 fi
 printf '{"id": "%s", "model": "%s", "perm": "%s", "effort": "%s"}\n' "$new_id" "$model" "$perm" "$effort" \
   | tee "$SESSIONS/$new_id.json" > "$STATE"
+# /effort also becomes the default for new sessions of this model, where Claude
+# Code keeps it itself (typing /effort in a session does the same).
+[ "$mode" = effort ] && python3 - "$HOME/.claude/settings.json" "$model" "$effort" <<'PY'
+import json, os, sys
+path, model, level = sys.argv[1:]
+try:
+    s = json.load(open(path))
+except FileNotFoundError:
+    s = {}
+s.setdefault("modelSettings", {}).setdefault(model, {})["effortLevel"] = level
+with open(path + ".tg-tmp", "w") as f:
+    json.dump(s, f, indent=2)
+    f.write("\n")
+if os.path.exists(path):
+    os.chmod(path + ".tg-tmp", os.stat(path).st_mode & 0o777)
+os.replace(path + ".tg-tmp", path)
+print(f"default effort for {model}: {level}")
+PY
 
 [ -z "$adds" ] && stop_old
 exit 0
