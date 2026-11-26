@@ -232,6 +232,11 @@ Bot API itself.
   that sent the message you reply to; the active session stays the same
   (`TELEGRAM_REPLY_SWITCHES=1`: the reply makes that session active). A button
   tap goes to the session that sent the button.
+- A swipe-reply to a bot message that no session sent, such as a notification
+  a script posts through the Bot API, has no session to go to. With two or
+  more sessions open, the relay asks which session it is for, with a button
+  per session and "+ New session". It no longer goes to whichever session
+  happens to be active. With one session open, the reply goes straight to it.
 - With two or more sessions open, a message from a session that isn't active
   gets a "↩ Reply to 🔵 2·sonnet" button that shows where it comes from and
   makes it active. The text itself stays as the session wrote it, so it can be

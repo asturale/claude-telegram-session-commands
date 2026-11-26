@@ -14,6 +14,8 @@
  *   - plain messages go to the active session;
  *   - a swipe-reply to a message goes to the session that sent it (and makes
  *     that session active), button taps go to the session that sent the button;
+ *   - a swipe-reply to a bot message no session sent (a script's notification
+ *     through the Bot API) asks which session it is for, when two or more are open;
  *   - permission replies ("yes abcde") go to every session; only the one that
  *     asked knows the id.
  *
@@ -382,6 +384,7 @@ async function runRelay(): Promise<void> {
   let exiting = false
   const owners = new Map<string, number>(restart?.owners ?? []) // `${chat}:${message_id}` → client pid
   const pendingNew = new Map<string, { prompt: string, update?: Update }>() // `${chat}:${message_id}` →
+  const pendingPick = new Map<string, Update>() // picker `${chat}:${message_id}` → the reply waiting for a session
   let waiting: Update[] = []
   let waitTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -1103,6 +1106,31 @@ async function runRelay(): Promise<void> {
         await answer()
         await newMenu(chat, '')
         break
+      case 'pick': {
+        const key = `${chat}:${msgId}`
+        const held = pendingPick.get(key)
+        pendingPick.delete(key)
+        if (!held?.message) {
+          await answer('Already handled.')
+          break
+        }
+        if (arg === 'new') {
+          await answer()
+          await edit('→ New session.')
+          await newMenu(chat, held.message.text ?? '', held)
+          break
+        }
+        if (!c) {
+          pendingPick.set(key, held) // still undecided: another tap can pick an open session
+          await answer('That session is closed.')
+          break
+        }
+        if (REPLY_SWITCHES) setActive(c)
+        deliver(c, held)
+        await answer(`Sent to ${label(c)}`)
+        await edit(`→ Sent to ${label(c)}.`)
+        break
+      }
       case 'new': {
         const model = MODELS[Number(arg)]
         if (!model || !NEW_CMD) {
@@ -1162,6 +1190,25 @@ async function runRelay(): Promise<void> {
         if (REPLY_SWITCHES && c !== active && m.chat.type === 'private' && owner(m.from?.id)) setActive(c)
         deliver(c, u)
         return
+      }
+      // A bot message no session sent (a script notifying through the Bot API): the
+      // active session is a guess, so with more than one open, ask which it is for.
+      const live = clients.filter(x => !x.replaced && !x.closing)
+      if (r.from?.is_bot && live.length > 1 && m.chat.type === 'private' && owner(m.from?.id)) {
+        const sent = await api.sendMessage(m.chat.id, 'That message did not come from a session. Which session is your reply for?', {
+          reply_parameters: { message_id: m.message_id },
+          reply_markup: {
+            inline_keyboard: [
+              ...live.map(x => [{ text: `${x === active ? '● ' : ''}${label(x)}`, callback_data: `relay:pick:${x.pid}` }]),
+              ...(NEW_CMD ? [[{ text: '+ New session', callback_data: 'relay:pick:new' }]] : []),
+            ],
+          },
+        }).catch(() => null)
+        if (sent) {
+          pendingPick.set(`${m.chat.id}:${sent.message_id}`, u)
+          if (pendingPick.size > 100) pendingPick.delete(pendingPick.keys().next().value!) // never tapped
+          return
+        }
       }
     }
     // Everything sent after /new is for the session it opens, also while that starts.
