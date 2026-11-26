@@ -5,8 +5,11 @@ name: security-scan
 # run scans everything and is informational. Accepted findings: .gitleaksignore / .semgrepignore.
 # Trivy (dependencies) fails the run on fixable HIGH/CRITICAL vulnerabilities in the lockfiles;
 # accepted findings go in .trivyignore (one CVE id per line, with a comment why).
+# One job, not three: billing rounds every job up to a whole minute and each check takes seconds.
+# Push only on the default branch; feature branches are scanned through their pull request.
 on:
   push:
+    branches: [main, master]
   pull_request:
   schedule:
     - cron: "41 5 * * 1"
@@ -15,9 +18,16 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same pull request cancels the older run (the PR scan covers base..head).
+# Pushes to the default branch are never cancelled: each one only scans its own commits.
+concurrency:
+  group: security-scan-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  gitleaks:
+  scan:
     runs-on: ubuntu-latest
+    container: semgrep/semgrep:1.181.1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -32,30 +42,25 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          curl -sSfL -o gl.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VERSION}/gitleaks_${GL_VERSION}_linux_x64.tar.gz"
-          echo "${GL_SHA256}  gl.tgz" | sha256sum -c -
-          tar xzf gl.tgz gitleaks
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          curl -sSfL -o /tmp/gl.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VERSION}/gitleaks_${GL_VERSION}_linux_x64.tar.gz"
+          echo "${GL_SHA256}  /tmp/gl.tgz" | sha256sum -c -
+          tar xzf /tmp/gl.tgz -C /tmp gitleaks
           # The first push of a new branch has no usable "before": compare with the default branch instead.
           if [ "$EVENT" = push ] && ! { [ -n "$BEFORE" ] && git cat-file -e "$BEFORE" 2>/dev/null; }; then
             BEFORE=$(git merge-base "origin/$DEFAULT_BRANCH" "$HEAD_SHA" 2>/dev/null || true)
             [ "$BEFORE" = "$HEAD_SHA" ] && BEFORE=""
           fi
           if [ "$EVENT" = push ] && [ -n "$BEFORE" ]; then
-            ./gitleaks git --redact --no-banner --exit-code 1 --log-opts="$BEFORE..$HEAD_SHA" .
+            /tmp/gitleaks git --redact --no-banner --exit-code 1 --log-opts="$BEFORE..$HEAD_SHA" .
           elif [ "$EVENT" = pull_request ]; then
-            ./gitleaks git --redact --no-banner --exit-code 1 --log-opts="$BASE_SHA..$HEAD_SHA" .
+            /tmp/gitleaks git --redact --no-banner --exit-code 1 --log-opts="$BASE_SHA..$HEAD_SHA" .
           else
-            ./gitleaks dir --redact --no-banner --exit-code 1 .
+            /tmp/gitleaks dir --redact --no-banner --exit-code 1 .
           fi
 
-  semgrep:
-    runs-on: ubuntu-latest
-    container: semgrep/semgrep:1.181.1
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
       - name: semgrep
+        if: ${{ !cancelled() }}
         env:
           SEMGREP_SEND_METRICS: "off"
           EVENT: ${{ github.event_name }}
@@ -81,19 +86,16 @@ jobs:
             semgrep scan $ARGS .
           fi
 
-  trivy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: trivy
+        if: ${{ !cancelled() }}
         env:
           TRIVY_VERSION: "0.76.1"
           TRIVY_SHA256: "c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0"
         run: |
-          curl -sSfL -o trivy.tgz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
-          echo "${TRIVY_SHA256}  trivy.tgz" | sha256sum -c -
-          tar xzf trivy.tgz trivy
+          curl -sSfL -o /tmp/trivy.tgz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  /tmp/trivy.tgz" | sha256sum -c -
+          tar xzf /tmp/trivy.tgz -C /tmp trivy
           # Fixable HIGH/CRITICAL vulnerabilities in dependency lockfiles fail the run.
           # No findings and no lockfiles both exit 0. Accepted CVEs: .trivyignore.
-          ./trivy fs --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+          /tmp/trivy fs --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
             --no-progress --exit-code 1 --db-repository public.ecr.aws/aquasecurity/trivy-db .
