@@ -1206,6 +1206,7 @@ async function runRelay(): Promise<void> {
         }).catch(() => null)
         if (sent) {
           pendingPick.set(`${m.chat.id}:${sent.message_id}`, u)
+          if (pendingPick.size > 100) pendingPick.delete(pendingPick.keys().next().value!) // never tapped
           return
         }
       }
